@@ -1,14 +1,15 @@
-const Customer = require('../models/Customer.model');
-const User = require('../models/User.model');
+// controllers/customer.controller.js
+import Customer from '../models/customer.model.js';
+import User from '../models/user.model.js';
 
 // Create or Update Customer Profile
-exports.createUpdateProfile = async (req, res) => {
+export const createUpdateProfile = async (req, res) => {
   try {
     const userId = req.user._id;
     const { personalInfo, deliveryAddress, preferences } = req.body;
 
     let customer = await Customer.findOne({ user: userId });
-    
+
     if (customer) {
       // Update existing profile
       customer.personalInfo = { ...customer.personalInfo, ...personalInfo };
@@ -39,11 +40,11 @@ exports.createUpdateProfile = async (req, res) => {
 };
 
 // Get Customer Profile
-exports.getProfile = async (req, res) => {
+export const getProfile = async (req, res) => {
   try {
     const customer = await Customer.findOne({ user: req.user._id })
       .populate('user', 'phone');
-    
+
     if (!customer) {
       return res.status(404).json({ message: 'Profile not found' });
     }
@@ -55,15 +56,12 @@ exports.getProfile = async (req, res) => {
 };
 
 // Add Order to Customer History
-exports.addOrder = async (req, res) => {
+export const addOrder = async (req, res) => {
   try {
     const { products, totalAmount } = req.body;
-    
+
     const customer = await Customer.findOne({ user: req.user._id });
-    
-    if (!customer) {
-      return res.status(404).json({ message: 'Customer profile not found' });
-    }
+    if (!customer) return res.status(404).json({ message: 'Customer profile not found' });
 
     const newOrder = {
       orderId: 'ORD' + Date.now(),
@@ -85,13 +83,10 @@ exports.addOrder = async (req, res) => {
 };
 
 // Get Order History
-exports.getOrderHistory = async (req, res) => {
+export const getOrderHistory = async (req, res) => {
   try {
     const customer = await Customer.findOne({ user: req.user._id });
-    
-    if (!customer) {
-      return res.status(404).json({ message: 'Customer profile not found' });
-    }
+    if (!customer) return res.status(404).json({ message: 'Customer profile not found' });
 
     res.status(200).json(customer.orderHistory);
   } catch (error) {

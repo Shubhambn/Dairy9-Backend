@@ -1,69 +1,55 @@
-const User = require('../models/User.model');
-const { generateOTP, isOTPExpired } = require('../utils/auth.utils');
-const jwt = require('jsonwebtoken');
+// controllers/auth.controller.js
+import User from '../models/user.model.js';
+import jwt from 'jsonwebtoken';
+import { generateOTP } from '../utils/generateOTP.js';
 
-exports.sendOTP = async (req, res) => {
+export async function sendOTP(req, res) {
   try {
     const { phone } = req.body;
-    if (!phone) {
-      return res.status(400).json({ message: 'Phone number is required' });
-    }
-
-    const otp = generateOTP();
-    const otpExpiryTime = new Date(Date.now() + 5 * 60 * 1000); // OTP valid for 5 minutes
+    if (!phone) return res.status(400).json({ message: 'Phone required' });
 
     let user = await User.findOne({ phone });
-    if (!user) {
-      user = new User({ phone });
-    }
+    if (!user) user = await User.create({ phone });
 
-    user.otp = {
-      code: otp,
-      expiresAt: otpExpiryTime
-    };
-
+    const otpCode = generateOTP();
+    user.otp = { code: otpCode, expiresAt: new Date(Date.now() + 5*60*1000) };
     await user.save();
 
-    // In production, integrate with SMS service provider
-    console.log(`OTP for ${phone}: ${otp}`);
+    console.log(`📲 OTP for ${phone}: ${otpCode}`); // Replace with SMS provider
 
     res.status(200).json({ message: 'OTP sent successfully' });
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ message: error.message });
   }
-};
+}
 
-exports.verifyOTP = async (req, res) => {
+export async function verifyOTP(req, res) {
   try {
     const { phone, otp } = req.body;
-
     const user = await User.findOne({ phone });
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ message: 'User not found' });
 
-    if (!user.otp || !user.otp.code) {
-      return res.status(400).json({ message: 'OTP not requested' });
-    }
-
-    if (isOTPExpired(user.otp.expiresAt)) {
-      return res.status(400).json({ message: 'OTP expired' });
-    }
-
-    if (user.otp.code !== otp) {
+    if (!user.otp || user.otp.code !== otp)
       return res.status(400).json({ message: 'Invalid OTP' });
-    }
+    if (user.otp.expiresAt < Date.now())
+      return res.status(400).json({ message: 'OTP expired' });
 
     user.isVerified = true;
     user.otp = undefined;
     await user.save();
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
-      expiresIn: '7d'
-    });
+    const token = jwt.sign(
+      { id: user._id, phone: user.phone },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
 
-    res.status(200).json({ token, message: 'OTP verified successfully' });
+    res.status(200).json({
+      message: 'OTP verified',
+      token,
+      user: { id: user._id, phone: user.phone }
+    });
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ message: error.message });
   }
-};
+}
