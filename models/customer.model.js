@@ -1,3 +1,5 @@
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\models\customer.model.js
+
 import mongoose from "mongoose";
 
 const customerSchema = new mongoose.Schema({

@@ -1,3 +1,5 @@
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\middlewares\ratelimiter.js
+
 import rateLimit from 'express-rate-limit';
 
 const limiter = rateLimit({

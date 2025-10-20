@@ -1,5 +1,4 @@
-// utils/generateOTP.js
-
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\utils\generateOTP.js
 export function generateOTP(length = 6) {
   let otp = '';
   for (let i = 0; i < length; i++) {

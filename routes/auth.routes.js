@@ -1,4 +1,4 @@
-// routes/auth.routes.js
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\auth.routes.js
 import { Router } from 'express';
 import { sendOTP, verifyOTP } from '../controllers/auth.controller.js';
 import auth from '../middlewares/auth.js';

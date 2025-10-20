@@ -1,4 +1,4 @@
-// controllers/auth.controller.js
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\controllers\auth.controller.js
 import User from '../models/user.model.js';
 import jwt from 'jsonwebtoken';
 import { generateOTP } from '../utils/generateOTP.js';
