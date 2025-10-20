@@ -1,4 +1,6 @@
-// config/db.js
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\config\db.js
+
+
 import mongoose from 'mongoose';
 
 const connectDB = async () => {

@@ -1,3 +1,5 @@
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\middlewares\auth.js
+
 import jwt from 'jsonwebtoken';
 import User from '../models/user.model.js';
 

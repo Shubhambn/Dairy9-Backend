@@ -1,4 +1,6 @@
-// controllers/customer.controller.js
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\controllers\customer.controller.js
+
+
 import Customer from '../models/customer.model.js';
 import User from '../models/user.model.js';
 

@@ -1,3 +1,4 @@
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\customer.routes.js
 import express from 'express';
 import { createUpdateProfile, getProfile, addOrder, getOrderHistory } from '../controllers/customer.controller.js';
 import auth from '../middlewares/auth.js';
