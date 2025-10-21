@@ -26,7 +26,14 @@ const productSchema = new mongoose.Schema({
     type: String,
     default: '/images/default-product.jpg'
   },
-  images: [String],
+  imagePublicId: {
+    type: String,
+    default: null
+  },
+  images: [{
+    url: String,
+    publicId: String
+  }],
   unit: {
     type: String,
     enum: ['ml', 'liter', 'gm', 'kg', 'pack', 'piece'],
@@ -78,6 +85,11 @@ const productSchema = new mongoose.Schema({
 // Calculate discounted price
 productSchema.virtual('discountedPrice').get(function() {
   return this.price - (this.price * this.discount / 100);
+});
+
+// Convert to JSON with virtuals
+productSchema.set('toJSON', {
+  virtuals: true
 });
 
 const Product = mongoose.model('Product', productSchema);
