@@ -8,7 +8,9 @@ import connectDB from './config/db.js';
 import authRoutes from './routes/auth.routes.js';
 import customerRoutes from './routes/customer.routes.js';
 import categoryRoutes from './routes/category.routes.js';
-import productRoutes from './routes/product.routes.js'; 
+import productRoutes from './routes/product.routes.js';
+import orderRoutes from './routes/order.routes.js'; 
+import paymentRoutes from './routes/payment.routes.js'; 
 
 dotenv.config();
 const app = express();
@@ -21,7 +23,9 @@ connectDB();
 app.use('/api/auth', authRoutes);
 app.use('/api/customer', customerRoutes);
 app.use('/api/catalog', categoryRoutes);
-app.use('/api/catalog', productRoutes); 
+app.use('/api/catalog', productRoutes);
+app.use('/api/orders', orderRoutes); 
+app.use('/api/payments', paymentRoutes); 
 
 app.get('/', (req, res) => res.json({ message: 'Dairy9 Backend Running' }));
 
