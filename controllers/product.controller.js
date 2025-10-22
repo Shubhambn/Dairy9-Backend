@@ -2,6 +2,7 @@
 
 import Product from '../models/product.model.js';
 import Category from '../models/category.model.js';
+import { uploadToCloudinary, uploadMultipleToCloudinary, deleteFromCloudinary } from '../utils/cloudinaryUpload.js';
 
 // @desc    Create new product
 // @route   POST /api/catalog/products
@@ -17,8 +18,6 @@ export const createProduct = async (req, res) => {
       unitSize, 
       stock, 
       milkType, 
-      image,
-      images,
       nutritionalInfo,
       tags,
       discount,
@@ -46,6 +45,45 @@ export const createProduct = async (req, res) => {
       });
     }
 
+    let imageUrl = '/images/default-product.jpg';
+    let imagePublicId = null;
+    let additionalImages = [];
+
+    // Upload main image if provided
+    if (req.file) {
+      try {
+        const uploadResult = await uploadToCloudinary(req.file.buffer, 'dairy9/products');
+        imageUrl = uploadResult.secure_url;
+        imagePublicId = uploadResult.public_id;
+      } catch (uploadError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Error uploading image',
+          error: uploadError.message
+        });
+      }
+    }
+
+    // Upload additional images if provided
+    if (req.files && req.files.additionalImages) {
+      try {
+        const additionalUploads = await uploadMultipleToCloudinary(
+          req.files.additionalImages, 
+          'dairy9/products/additional'
+        );
+        additionalImages = additionalUploads.map(img => ({
+          url: img.secure_url,
+          publicId: img.public_id
+        }));
+      } catch (uploadError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Error uploading additional images',
+          error: uploadError.message
+        });
+      }
+    }
+
     const product = new Product({
       name,
       description,
@@ -55,8 +93,9 @@ export const createProduct = async (req, res) => {
       unitSize,
       stock: stock || 0,
       milkType: milkType || 'Cow',
-      image: image || '/images/default-product.jpg',
-      images: images || [],
+      image: imageUrl,
+      imagePublicId: imagePublicId,
+      images: additionalImages,
       nutritionalInfo: nutritionalInfo || {},
       tags: tags || [],
       discount: discount || 0,
@@ -236,6 +275,27 @@ export const updateProduct = async (req, res) => {
       }
     }
 
+    // Handle image upload if new image is provided
+    if (req.file) {
+      try {
+        // Delete old image from Cloudinary if exists
+        if (product.imagePublicId) {
+          await deleteFromCloudinary(product.imagePublicId);
+        }
+
+        // Upload new image
+        const uploadResult = await uploadToCloudinary(req.file.buffer, 'dairy9/products');
+        req.body.image = uploadResult.secure_url;
+        req.body.imagePublicId = uploadResult.public_id;
+      } catch (uploadError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Error uploading image',
+          error: uploadError.message
+        });
+      }
+    }
+
     const updatedProduct = await Product.findByIdAndUpdate(
       req.params.id,
       { $set: req.body },
@@ -269,6 +329,24 @@ export const deleteProduct = async (req, res) => {
         success: false,
         message: 'Product not found'
       });
+    }
+
+    // Delete images from Cloudinary
+    try {
+      if (product.imagePublicId) {
+        await deleteFromCloudinary(product.imagePublicId);
+      }
+
+      // Delete additional images
+      if (product.images && product.images.length > 0) {
+        for (const img of product.images) {
+          if (img.publicId) {
+            await deleteFromCloudinary(img.publicId);
+          }
+        }
+      }
+    } catch (deleteError) {
+      console.error('Error deleting images from Cloudinary:', deleteError);
     }
 
     // Soft delete - set isAvailable to false
@@ -364,6 +442,106 @@ export const searchProducts = async (req, res) => {
     });
   } catch (error) {
     console.error('Search Products Error:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
+  }
+};
+
+// @desc    Upload product images
+// @route   POST /api/catalog/products/:id/images
+// @access  Private (Admin)
+export const uploadProductImages = async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No images provided'
+      });
+    }
+
+    const uploadResults = await uploadMultipleToCloudinary(
+      req.files, 
+      'dairy9/products/additional'
+    );
+
+    const newImages = uploadResults.map(img => ({
+      url: img.secure_url,
+      publicId: img.public_id
+    }));
+
+    // Add new images to product
+    product.images.push(...newImages);
+    await product.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Images uploaded successfully',
+      images: newImages
+    });
+  } catch (error) {
+    console.error('Upload Images Error:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
+  }
+};
+
+// @desc    Delete product image
+// @route   DELETE /api/catalog/products/:id/images/:imageId
+// @access  Private (Admin)
+export const deleteProductImage = async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const imageIndex = product.images.findIndex(img => 
+      img._id.toString() === req.params.imageId
+    );
+
+    if (imageIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: 'Image not found'
+      });
+    }
+
+    const imageToDelete = product.images[imageIndex];
+
+    // Delete from Cloudinary
+    if (imageToDelete.publicId) {
+      await deleteFromCloudinary(imageToDelete.publicId);
+    }
+
+    // Remove from product images array
+    product.images.splice(imageIndex, 1);
+    await product.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Image deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete Image Error:', error);
     res.status(500).json({ 
       success: false,
       message: 'Server error', 
