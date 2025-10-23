@@ -1,12 +1,14 @@
 // C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\auth.routes.js
+
 import { Router } from 'express';
-import { sendOTP, verifyOTP } from '../controllers/auth.controller.js';
+import { sendOTP, verifyOTP, signup } from '../controllers/auth.controller.js';
 import auth from '../middlewares/auth.js';
 
 const router = Router();
 
 router.post('/send-otp', sendOTP);
 router.post('/verify-otp', verifyOTP);
+router.post('/signup', signup); // NEW SIGNUP ROUTE
 
 // Protected route example
 router.get('/dashboard', auth, (req, res) => {
