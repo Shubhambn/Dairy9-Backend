@@ -92,20 +92,71 @@ export const getAllProducts = async (req, res) => {
 export const createCategory = async (req, res) => {
   try {
     const { name, description, image, displayOrder } = req.body;
-    
+
     const category = new Category({
       name,
       description,
       image,
       displayOrder
     });
-    
+
     await category.save();
     res.status(201).json({ message: 'Category created successfully', category });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(400).json({ message: 'Category name already exists' });
     }
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+// Admin: Update category
+export const updateCategory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description, image, displayOrder } = req.body;
+
+    const category = await Category.findById(id);
+    if (!category) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+
+    category.name = name;
+    category.description = description;
+    category.image = image;
+    category.displayOrder = displayOrder;
+
+    await category.save();
+    res.status(200).json({ message: 'Category updated successfully', category });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'Category name already exists' });
+    }
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+// Admin: Delete category
+export const deleteCategory = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const category = await Category.findById(id);
+    if (!category) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+
+    // Check if category has products
+    const productsCount = await Product.countDocuments({ category: id });
+    if (productsCount > 0) {
+      return res.status(400).json({
+        message: 'Cannot delete category with existing products. Please reassign or delete products first.'
+      });
+    }
+
+    await Category.findByIdAndDelete(id);
+    res.status(200).json({ message: 'Category deleted successfully' });
+  } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
