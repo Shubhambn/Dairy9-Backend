@@ -2,6 +2,7 @@
 
 import Category from '../models/category.model.js';
 import Product from '../models/product.model.js';
+import { uploadToCloudinary, deleteFromCloudinary } from '../utils/cloudinaryUpload.js';
 
 // Get all active categories
 export const getCategories = async (req, res) => {
@@ -91,21 +92,150 @@ export const getAllProducts = async (req, res) => {
 // Admin: Create category
 export const createCategory = async (req, res) => {
   try {
-    const { name, description, image, displayOrder } = req.body;
+    const { name, description, displayOrder } = req.body;
+    
+    let imageUrl = '/images/default-category.jpg';
+    let imagePublicId = null;
+
+    // Upload image if provided
+    if (req.file) {
+      try {
+        const uploadResult = await uploadToCloudinary(req.file.buffer, 'dairy9/categories');
+        imageUrl = uploadResult.secure_url;
+        imagePublicId = uploadResult.public_id;
+      } catch (uploadError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Error uploading image',
+          error: uploadError.message
+        });
+      }
+    }
     
     const category = new Category({
       name,
       description,
-      image,
+      image: imageUrl,
+      imagePublicId,
       displayOrder
     });
     
     await category.save();
-    res.status(201).json({ message: 'Category created successfully', category });
+    res.status(201).json({ 
+      success: true,
+      message: 'Category created successfully', 
+      category 
+    });
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(400).json({ message: 'Category name already exists' });
+      return res.status(400).json({ 
+        success: false,
+        message: 'Category name already exists' 
+      });
     }
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
+  }
+};
+
+// Admin: Update category
+export const updateCategory = async (req, res) => {
+  try {
+    const { name, description, displayOrder } = req.body;
+    const category = await Category.findById(req.params.id);
+    
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: 'Category not found'
+      });
+    }
+
+    // Handle image upload if new image is provided
+    if (req.file) {
+      try {
+        // Delete old image from Cloudinary if exists
+        if (category.imagePublicId) {
+          await deleteFromCloudinary(category.imagePublicId);
+        }
+
+        // Upload new image
+        const uploadResult = await uploadToCloudinary(req.file.buffer, 'dairy9/categories');
+        category.image = uploadResult.secure_url;
+        category.imagePublicId = uploadResult.public_id;
+      } catch (uploadError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Error uploading image',
+          error: uploadError.message
+        });
+      }
+    }
+
+    // Update other fields
+    if (name) category.name = name;
+    if (description !== undefined) category.description = description;
+    if (displayOrder !== undefined) category.displayOrder = displayOrder;
+
+    await category.save();
+
+    res.json({
+      success: true,
+      message: 'Category updated successfully',
+      category
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Category name already exists'
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
+// Admin: Delete category
+export const deleteCategory = async (req, res) => {
+  try {
+    const category = await Category.findById(req.params.id);
+    
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: 'Category not found'
+      });
+    }
+
+    // Delete image from Cloudinary if exists
+    if (category.imagePublicId) {
+      try {
+        await deleteFromCloudinary(category.imagePublicId);
+      } catch (deleteError) {
+        console.error('Error deleting image from Cloudinary:', deleteError);
+      }
+    }
+
+    // Soft delete - set isActive to false
+    category.isActive = false;
+    await category.save();
+
+    res.json({
+      success: true,
+      message: 'Category deleted successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
   }
 };

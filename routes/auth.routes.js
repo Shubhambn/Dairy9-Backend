@@ -3,12 +3,13 @@
 import { Router } from 'express';
 import { sendOTP, verifyOTP, signup } from '../controllers/auth.controller.js';
 import auth from '../middlewares/auth.js';
+import { authRateLimit } from '../middlewares/rateLimiter.js';
 
 const router = Router();
 
-router.post('/send-otp', sendOTP);
-router.post('/verify-otp', verifyOTP);
-router.post('/signup', signup); // NEW SIGNUP ROUTE
+router.post('/send-otp', authRateLimit, sendOTP);
+router.post('/verify-otp', authRateLimit, verifyOTP);
+router.post('/signup', authRateLimit, signup);
 
 // Protected route example
 router.get('/dashboard', auth, (req, res) => {
