@@ -1,6 +1,6 @@
 // Google Maps API service for geocoding and reverse geocoding
 
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || 'AIzaSyDf1vfB2AGpVCGh1fdwB5mMZ-ClAnYh0ic';
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY ;
 
 /**
  * Get coordinates from address using Google Geocoding API
