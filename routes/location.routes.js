@@ -1,3 +1,5 @@
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\location.routes.js
+
 // Location-related routes for Google Maps integration
 
 import { Router } from 'express';
