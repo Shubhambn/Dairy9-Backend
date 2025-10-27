@@ -1,7 +1,7 @@
 // C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\controllers\order.controller.js
 
-import Order from '../models/order.model.js';
 import Customer from '../models/customer.model.js';
+import Order from '../models/order.model.js';
 import Product from '../models/product.model.js';
 
 // Generate unique order ID
@@ -156,12 +156,24 @@ export const getCustomerOrders = async (req, res) => {
 export const getOrderById = async (req, res) => {
   try {
     const userId = req.user._id;
-    const customer = await Customer.findOne({ user: userId });
 
-    const order = await Order.findOne({
-      _id: req.params.id,
-      customer: customer._id
-    }).populate('items.product', 'name image unit milkType');
+    let orderQuery = { _id: req.params.id };
+
+    // If user is not admin, restrict to their own orders
+    if (req.user.role !== 'admin') {
+      const customer = await Customer.findOne({ user: userId });
+      if (!customer) {
+        return res.status(404).json({
+          success: false,
+          message: 'Customer profile not found'
+        });
+      }
+      orderQuery.customer = customer._id;
+    }
+
+    const order = await Order.findOne(orderQuery)
+      .populate('items.product', 'name image unit milkType')
+      .populate('customer', 'personalInfo.fullName');
 
     if (!order) {
       return res.status(404).json({
@@ -193,7 +205,7 @@ export const cancelOrder = async (req, res) => {
     const customer = await Customer.findOne({ user: userId });
 
     const order = await Order.findOne({
-      _id: req.params.id,
+      orderId: req.params.id,
       customer: customer._id
     });
 
@@ -238,6 +250,8 @@ export const updateOrderStatus = async (req, res) => {
     const { status } = req.body;
     const validStatuses = ['pending', 'confirmed', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'];
 
+    console.log('Update Order Status Request:', { orderId: req.params.id, status, user: req.user });
+
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
@@ -245,18 +259,22 @@ export const updateOrderStatus = async (req, res) => {
       });
     }
 
-    const order = await Order.findByIdAndUpdate(
-      req.params.id,
-      { orderStatus: status },
-      { new: true }
-    ).populate('items.product', 'name image');
+    const order = await Order.findOne({ orderId: req.params.id });
 
     if (!order) {
+      console.log('Order not found for orderId:', req.params.id);
       return res.status(404).json({
         success: false,
         message: 'Order not found'
       });
     }
+
+    console.log('Found order:', order._id, 'current status:', order.orderStatus);
+
+    order.orderStatus = status;
+    await order.save();
+
+    console.log('Order status updated successfully to:', status);
 
     res.status(200).json({
       success: true,

@@ -5,7 +5,8 @@ import {
   getDashboardStats,
   getAdminOrders,
   updateOrderStatus,
-  getInvoiceSummary
+  getInvoiceSummary,
+  generateOverallInvoice
 } from '../controllers/adminDashboard.controller.js';
 
 import auth from '../middlewares/auth.js';
@@ -22,5 +23,6 @@ router.get('/dashboard/stats', getDashboardStats);
 router.get('/orders', getAdminOrders);
 router.put('/orders/:orderId/status', updateOrderStatus);
 router.get('/invoices', getInvoiceSummary);
+router.get('/invoices/pdf', generateOverallInvoice);
 
 export default router;
