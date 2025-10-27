@@ -1,5 +1,3 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\category.routes.js
-
 import express from 'express';
 import {
   createCategory,
@@ -11,6 +9,8 @@ import {
   updateCategory
 } from '../controllers/category.controller.js';
 import auth from '../middlewares/auth.js';
+import adminAuth from '../middlewares/adminAuth.js';
+import upload from '../middlewares/upload.js';
 
 const router = express.Router();
 
@@ -20,9 +20,9 @@ router.get('/products', getAllProducts);
 router.get('/categories/:categoryId/products', getProductsByCategory);
 router.get('/products/search', searchProducts);
 
-// Protected routes (Admin)
-router.post('/categories', auth, createCategory);
-router.put('/categories/:id', auth, updateCategory);
-router.delete('/categories/:id', auth, deleteCategory);
+// Protected routes (Admin only)
+router.post('/categories', auth, adminAuth, upload.single('image'), createCategory);
+router.put('/categories/:id', auth, adminAuth, upload.single('image'), updateCategory);
+router.delete('/categories/:id', auth, adminAuth, deleteCategory);
 
 export default router;

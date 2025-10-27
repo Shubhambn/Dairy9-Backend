@@ -20,6 +20,22 @@ const adminSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  location: {
+    coordinates: {
+      latitude: { type: Number, required: true },
+      longitude: { type: Number, required: true }
+    },
+    formattedAddress: String,
+    city: String,
+    state: String,
+    pincode: String
+  },
+  serviceRadius: {
+    type: Number,
+    default: 50, // Default 50km radius
+    min: 1,
+    max: 100
+  },
   contactNumber: {
     type: String,
     required: true

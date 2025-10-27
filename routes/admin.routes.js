@@ -8,6 +8,12 @@ import {
   getInvoiceSummary,
   generateOverallInvoice
 } from '../controllers/adminDashboard.controller.js';
+import {
+  updateServiceRadius,
+  updateLocation,
+  getRetailerOrders,
+  getRetailerProfile
+} from '../controllers/retailer.controller.js';
 
 import auth from '../middlewares/auth.js';
 import adminAuth from '../middlewares/adminAuth.js';
@@ -24,5 +30,11 @@ router.get('/orders', getAdminOrders);
 router.put('/orders/:orderId/status', updateOrderStatus);
 router.get('/invoices', getInvoiceSummary);
 router.get('/invoices/pdf', generateOverallInvoice);
+
+// Retailer-specific routes
+router.get('/retailer/profile', getRetailerProfile);
+router.put('/retailer/radius', updateServiceRadius);
+router.put('/retailer/location', updateLocation);
+router.get('/retailer/orders', getRetailerOrders);
 
 export default router;

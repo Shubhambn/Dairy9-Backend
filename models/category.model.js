@@ -9,7 +9,14 @@ const categorySchema = new mongoose.Schema({
     unique: true
   },
   description: String,
-  image: String,
+  image: {
+    type: String,
+    default: '/images/default-category.jpg'
+  },
+  imagePublicId: {
+    type: String,
+    default: null
+  },
   isActive: {
     type: Boolean,
     default: true

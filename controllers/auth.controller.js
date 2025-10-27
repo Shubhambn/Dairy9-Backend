@@ -1,19 +1,24 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\controllers\auth.controller.js
-
 import User from '../models/user.model.js';
 import Customer from '../models/customer.model.js';
 import Admin from '../models/admin.model.js';
 import jwt from 'jsonwebtoken';
 import { generateOTP } from '../utils/generateOTP.js';
+import { geocodeAddress, reverseGeocode, extractAddressComponents } from '../services/googleMapsService.js';
 
-// Existing OTP functions...
+// UPDATED: Check if user exists before sending OTP
 export async function sendOTP(req, res) {
   try {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ message: 'Phone required' });
 
-    let user = await User.findOne({ phone });
-    if (!user) user = await User.create({ phone });
+    // Check if user exists - DON'T create automatically
+    const user = await User.findOne({ phone });
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'User not found. Please sign up first.' 
+      });
+    }
 
     const otpCode = generateOTP();
     user.otp = { code: otpCode, expiresAt: new Date(Date.now() + 5*60*1000) };
@@ -21,9 +26,15 @@ export async function sendOTP(req, res) {
 
     console.log(`📲 OTP for ${phone}: ${otpCode}`);
 
-    res.status(200).json({ message: 'OTP sent successfully' });
+    res.status(200).json({ 
+      success: true,
+      message: 'OTP sent successfully' 
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 }
 
@@ -57,7 +68,8 @@ export async function verifyOTP(req, res) {
     }
 
     res.status(200).json({
-      message: 'OTP verified',
+      success: true,
+      message: 'OTP verified successfully',
       token,
       user: { 
         id: user._id, 
@@ -67,11 +79,14 @@ export async function verifyOTP(req, res) {
       }
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 }
 
-// NEW: Signup function for both Customer and Admin
+// Enhanced signup function with location support
 export async function signup(req, res) {
   try {
     const { 
@@ -80,7 +95,9 @@ export async function signup(req, res) {
       address, 
       contactNo, 
       shopName, 
-      userType = 'customer' 
+      userType = 'customer',
+      coordinates, // { latitude, longitude }
+      formattedAddress
     } = req.body;
 
     if (!phone || !fullName || !address || !contactNo) {
@@ -112,28 +129,94 @@ export async function signup(req, res) {
       role: userType 
     });
 
+    // Get location data if coordinates provided, otherwise geocode the address
+    let locationData = null;
+    if (coordinates && coordinates.latitude && coordinates.longitude) {
+      // Use provided coordinates
+      const reverseGeocodeResult = await reverseGeocode(coordinates.latitude, coordinates.longitude);
+      if (reverseGeocodeResult) {
+        locationData = {
+          coordinates: {
+            latitude: coordinates.latitude,
+            longitude: coordinates.longitude
+          },
+          formattedAddress: reverseGeocodeResult.formattedAddress,
+          addressComponents: extractAddressComponents(reverseGeocodeResult.addressComponents)
+        };
+      }
+    } else {
+      // Geocode the provided address
+      const geocodeResult = await geocodeAddress(address);
+      if (geocodeResult) {
+        locationData = {
+          coordinates: {
+            latitude: geocodeResult.latitude,
+            longitude: geocodeResult.longitude
+          },
+          formattedAddress: geocodeResult.formattedAddress,
+          addressComponents: extractAddressComponents(geocodeResult.addressComponents)
+        };
+      }
+    }
+
     // Create profile based on user type
     if (userType === 'customer') {
-      const customer = new Customer({
+      const customerData = {
         user: user._id,
         personalInfo: {
           fullName,
           alternatePhone: contactNo
         },
         deliveryAddress: {
-          addressLine1: address
+          addressLine1: address,
+          formattedAddress: locationData?.formattedAddress || address
         }
-      });
+      };
+
+      // Add location data if available
+      if (locationData) {
+        customerData.deliveryAddress.coordinates = locationData.coordinates;
+        if (locationData.addressComponents.city) {
+          customerData.deliveryAddress.city = locationData.addressComponents.city;
+        }
+        if (locationData.addressComponents.state) {
+          customerData.deliveryAddress.state = locationData.addressComponents.state;
+        }
+        if (locationData.addressComponents.pincode) {
+          customerData.deliveryAddress.pincode = locationData.addressComponents.pincode;
+        }
+      }
+
+      const customer = new Customer(customerData);
       await customer.save();
       user.customerProfile = customer._id;
     } else if (userType === 'admin') {
-      const admin = new Admin({
+      const adminData = {
         user: user._id,
         fullName,
         shopName,
         address,
         contactNumber: contactNo
-      });
+      };
+
+      // Add location data if available
+      if (locationData) {
+        adminData.location = {
+          coordinates: locationData.coordinates,
+          formattedAddress: locationData.formattedAddress
+        };
+        if (locationData.addressComponents.city) {
+          adminData.location.city = locationData.addressComponents.city;
+        }
+        if (locationData.addressComponents.state) {
+          adminData.location.state = locationData.addressComponents.state;
+        }
+        if (locationData.addressComponents.pincode) {
+          adminData.location.pincode = locationData.addressComponents.pincode;
+        }
+      }
+
+      const admin = new Admin(adminData);
       await admin.save();
       user.adminProfile = admin._id;
     }

@@ -20,7 +20,12 @@ const customerSchema = new mongoose.Schema({
     city: String,
     state: String,
     pincode: String,
-    landmark: String
+    landmark: String,
+    coordinates: {
+      latitude: Number,
+      longitude: Number
+    },
+    formattedAddress: String
   },
   preferences: {
     milkType: { type: String, enum: ['Cow', 'Buffalo', 'Both'], default: 'Cow' },

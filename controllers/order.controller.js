@@ -3,6 +3,8 @@
 import Customer from '../models/customer.model.js';
 import Order from '../models/order.model.js';
 import Product from '../models/product.model.js';
+import Admin from '../models/admin.model.js';
+import { getClosestRetailer } from '../utils/locationUtils.js';
 
 // Generate unique order ID
 const generateOrderId = () => {
@@ -70,6 +72,29 @@ export const createOrder = async (req, res) => {
       });
     }
 
+    // Find the closest retailer for order assignment
+    let assignedRetailer = null;
+    const customerLocation = customer.deliveryAddress?.coordinates;
+    
+    if (customerLocation && customerLocation.latitude && customerLocation.longitude) {
+      // Get all active retailers
+      const retailers = await Admin.find({ isActive: true }).populate('user', 'phone');
+      
+      // Find the closest retailer within service radius
+      assignedRetailer = getClosestRetailer(
+        customerLocation.latitude,
+        customerLocation.longitude,
+        retailers,
+        50 // 50km max radius
+      );
+      
+      if (assignedRetailer) {
+        console.log(`Order assigned to retailer: ${assignedRetailer.shopName} (${assignedRetailer.distance}km away)`);
+      } else {
+        console.log('No retailer found within service radius');
+      }
+    }
+
     // Create order
     const order = new Order({
       orderId: generateOrderId(),
@@ -81,7 +106,8 @@ export const createOrder = async (req, res) => {
       deliveryTime: deliveryTime || customer.preferences?.deliveryTime,
       paymentMethod: paymentMethod || 'cash',
       specialInstructions,
-      deliveryDate: new Date(Date.now() + 24 * 60 * 60 * 1000) // Next day delivery
+      deliveryDate: new Date(Date.now() + 24 * 60 * 60 * 1000), // Next day delivery
+      assignedRetailer: assignedRetailer?._id
     });
 
     await order.save();

@@ -53,7 +53,16 @@ const orderSchema = new mongoose.Schema({
     city: String,
     state: String,
     pincode: String,
-    landmark: String
+    landmark: String,
+    coordinates: {
+      latitude: Number,
+      longitude: Number
+    },
+    formattedAddress: String
+  },
+  assignedRetailer: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Admin'
   },
   deliveryTime: String,
   paymentStatus: {
