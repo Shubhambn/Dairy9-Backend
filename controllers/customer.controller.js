@@ -8,23 +8,35 @@ import User from '../models/user.model.js';
 export const createUpdateProfile = async (req, res) => {
   try {
     const userId = req.user._id;
-    const { personalInfo, deliveryAddress, preferences } = req.body;
+    const { personalInfo, deliveryAddress } = req.body;
+
+    // Convert empty strings to null for date fields and validate date
+    const processedPersonalInfo = { ...personalInfo };
+    if (processedPersonalInfo.dateOfBirth && processedPersonalInfo.dateOfBirth.trim() !== '') {
+      const date = new Date(processedPersonalInfo.dateOfBirth);
+      processedPersonalInfo.dateOfBirth = isNaN(date.getTime()) ? null : date;
+    } else {
+      processedPersonalInfo.dateOfBirth = null;
+    }
 
     let customer = await Customer.findOne({ user: userId });
 
     if (customer) {
       // Update existing profile
-      customer.personalInfo = { ...customer.personalInfo, ...personalInfo };
+      customer.personalInfo = { ...customer.personalInfo, ...processedPersonalInfo };
       customer.deliveryAddress = { ...customer.deliveryAddress, ...deliveryAddress };
-      customer.preferences = { ...customer.preferences, ...preferences };
     } else {
       // Create new profile
       customer = new Customer({
         user: userId,
-        personalInfo,
-        deliveryAddress,
-        preferences
+        personalInfo: processedPersonalInfo,
+        deliveryAddress
       });
+    }
+
+    // Ensure coordinates is always present in deliveryAddress
+    if (!customer.deliveryAddress.coordinates) {
+      customer.deliveryAddress.coordinates = { latitude: null, longitude: null };
     }
 
     await customer.save();
@@ -44,11 +56,41 @@ export const createUpdateProfile = async (req, res) => {
 // Get Customer Profile
 export const getProfile = async (req, res) => {
   try {
-    const customer = await Customer.findOne({ user: req.user._id })
+    let customer = await Customer.findOne({ user: req.user._id })
       .populate('user', 'phone');
 
     if (!customer) {
-      return res.status(404).json({ message: 'Profile not found' });
+      // Create a default profile structure if none exists
+      customer = new Customer({
+        user: req.user._id,
+        personalInfo: {
+          fullName: '',
+          email: '',
+          alternatePhone: '',
+          dateOfBirth: null
+        },
+        deliveryAddress: {
+          addressLine1: '',
+          addressLine2: '',
+          city: '',
+          state: '',
+          pincode: '',
+          landmark: '',
+          coordinates: {
+            latitude: null,
+            longitude: null
+          },
+          formattedAddress: ''
+        },
+
+        orderHistory: [],
+        walletBalance: 0
+      });
+
+      await customer.save();
+
+      // Link customer profile to user
+      await User.findByIdAndUpdate(req.user._id, { customerProfile: customer._id });
     }
 
     res.status(200).json(customer);

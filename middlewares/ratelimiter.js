@@ -47,6 +47,6 @@ export const rateLimiter = (windowMs = 15 * 60 * 1000, maxRequests = 100) => {
 };
 
 // Specific rate limiters for different endpoints
-export const authRateLimit = rateLimiter(15 * 60 * 1000, 5); // 5 requests per 15 minutes for auth
+export const authRateLimit = rateLimiter(15 * 60 * 1000, 10); // 10 requests per 15 minutes for auth
 export const generalRateLimit = rateLimiter(15 * 60 * 1000, 100); // 100 requests per 15 minutes for general API
 export const uploadRateLimit = rateLimiter(60 * 60 * 1000, 10); // 10 uploads per hour
