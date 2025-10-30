@@ -5,7 +5,8 @@ import {
   getDashboardStats,
   getAdminOrders,
   updateOrderStatus,
-  getInvoiceSummary
+  getInvoiceSummary,
+  generateOverallInvoice
 } from '../controllers/adminDashboard.controller.js';
 import {
   updateServiceRadius,
@@ -28,6 +29,7 @@ router.get('/dashboard/stats', getDashboardStats);
 router.get('/orders', getAdminOrders);
 router.put('/orders/:orderId/status', updateOrderStatus);
 router.get('/invoices', getInvoiceSummary);
+router.get('/invoices/pdf', generateOverallInvoice);
 
 // Retailer-specific routes
 router.get('/retailer/profile', getRetailerProfile);

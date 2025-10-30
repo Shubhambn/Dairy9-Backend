@@ -27,17 +27,7 @@ const customerSchema = new mongoose.Schema({
     },
     formattedAddress: String
   },
-  preferences: {
-    milkType: { type: String, enum: ['Cow', 'Buffalo', 'Both'], default: 'Cow' },
-    deliveryTime: String,
-    specialInstructions: String
-  },
-  subscription: {
-    isActive: { type: Boolean, default: false },
-    plan: String,
-    startDate: Date,
-    endDate: Date
-  },
+
   orderHistory: [{
     orderId: String,
     products: [{

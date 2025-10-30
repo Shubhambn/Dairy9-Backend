@@ -1,14 +1,12 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\category.routes.js
-
 import express from 'express';
 import {
+  createCategory,
+  deleteCategory,
+  getAllProducts,
   getCategories,
   getProductsByCategory,
   searchProducts,
-  getAllProducts,
-  createCategory,
-  updateCategory,
-  deleteCategory
+  updateCategory
 } from '../controllers/category.controller.js';
 import auth from '../middlewares/auth.js';
 import adminAuth from '../middlewares/adminAuth.js';

@@ -119,7 +119,7 @@ export const createCategory = async (req, res) => {
       imagePublicId,
       displayOrder
     });
-    
+
     await category.save();
     res.status(201).json({ 
       success: true,

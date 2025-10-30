@@ -8,6 +8,7 @@ import {
   cancelOrder,
   updateOrderStatus
 } from '../controllers/order.controller.js';
+import { generateInvoice } from '../controllers/invoice.controller.js';
 import auth from '../middlewares/auth.js';
 
 const router = express.Router();
@@ -19,6 +20,7 @@ router.use(auth);
 router.post('/', createOrder);
 router.get('/', getCustomerOrders);
 router.get('/:id', getOrderById);
+router.get('/:id/invoice', generateInvoice);
 router.put('/:id/cancel', cancelOrder);
 
 // Admin routes
