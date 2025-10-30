@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import { sendOTP, verifyOTP, signup } from '../controllers/auth.controller.js';
 import auth from '../middlewares/auth.js';
-import { authRateLimit } from '../middlewares/rateLimiter.js';
+import { authRateLimit } from '../middlewares/ratelimiter.js';
 
 const router = Router();
 
