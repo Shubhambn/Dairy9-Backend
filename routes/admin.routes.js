@@ -12,7 +12,8 @@ import {
   updateServiceRadius,
   updateLocation,
   getRetailerOrders,
-  getRetailerProfile
+  getRetailerProfile,
+  assignOrderToRetailer  // Add this import
 } from '../controllers/retailer.controller.js';
 
 import auth from '../middlewares/auth.js';
@@ -36,5 +37,6 @@ router.get('/retailer/profile', getRetailerProfile);
 router.put('/retailer/radius', updateServiceRadius);
 router.put('/retailer/location', updateLocation);
 router.get('/retailer/orders', getRetailerOrders);
+router.put('/retailer/orders/:orderId/assign', assignOrderToRetailer); // Add this route
 
 export default router;

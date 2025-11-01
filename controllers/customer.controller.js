@@ -126,6 +126,121 @@ export const addOrder = async (req, res) => {
   }
 };
 
+
+// @desc    Update customer delivery address
+// @route   PUT /api/customer/address
+// @access  Private
+export const updateDeliveryAddress = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { deliveryAddress } = req.body;
+
+    if (!deliveryAddress) {
+      return res.status(400).json({
+        success: false,
+        message: 'Delivery address is required'
+      });
+    }
+
+    // Validate required fields
+    if (!deliveryAddress.addressLine1 || !deliveryAddress.city || !deliveryAddress.state || !deliveryAddress.pincode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Address line 1, city, state, and pincode are required'
+      });
+    }
+
+    const customer = await Customer.findOne({ user: userId });
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer profile not found'
+      });
+    }
+
+    // Update delivery address
+    customer.deliveryAddress = {
+      ...customer.deliveryAddress,
+      ...deliveryAddress
+    };
+
+    await customer.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Delivery address updated successfully',
+      deliveryAddress: customer.deliveryAddress
+    });
+  } catch (error) {
+    console.error('Update Delivery Address Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Add coordinates to customer address
+// @route   PUT /api/customer/address/coordinates
+// @access  Private
+export const addAddressCoordinates = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { latitude, longitude } = req.body;
+
+    if (!latitude || !longitude) {
+      return res.status(400).json({
+        success: false,
+        message: 'Latitude and longitude are required'
+      });
+    }
+
+    if (!validateCoordinates(latitude, longitude)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid coordinates provided'
+      });
+    }
+
+    const customer = await Customer.findOne({ user: userId });
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer profile not found'
+      });
+    }
+
+    if (!customer.deliveryAddress) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please set a delivery address first'
+      });
+    }
+
+    // Update coordinates
+    customer.deliveryAddress.coordinates = {
+      latitude,
+      longitude
+    };
+
+    await customer.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Address coordinates updated successfully',
+      deliveryAddress: customer.deliveryAddress
+    });
+  } catch (error) {
+    console.error('Add Address Coordinates Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
 // Get Order History
 export const getOrderHistory = async (req, res) => {
   try {

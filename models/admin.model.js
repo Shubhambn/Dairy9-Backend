@@ -1,5 +1,3 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\models\admin.model.js
-
 import mongoose from 'mongoose';
 
 const adminSchema = new mongoose.Schema({
@@ -20,25 +18,29 @@ const adminSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  location: {
-    coordinates: {
-      latitude: { type: Number, required: true },
-      longitude: { type: Number, required: true }
-    },
-    formattedAddress: String,
-    city: String,
-    state: String,
-    pincode: String
-  },
-  serviceRadius: {
-    type: Number,
-    default: 50, // Default 50km radius
-    min: 1,
-    max: 100
-  },
   contactNumber: {
     type: String,
     required: true
+  },
+  location: {
+    type: {
+      coordinates: {
+        type: {
+          latitude: { type: Number, default: null },
+          longitude: { type: Number, default: null }
+        },
+        default: null
+      },
+      formattedAddress: { type: String, default: '' },
+      city: { type: String, default: '' },
+      state: { type: String, default: '' },
+      pincode: { type: String, default: '' }
+    },
+    default: {}
+  },
+  serviceRadius: {
+    type: Number,
+    default: 50
   },
   isActive: {
     type: Boolean,

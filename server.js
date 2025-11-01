@@ -1,5 +1,3 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\server.js
-
 import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
@@ -10,6 +8,7 @@ import customerRoutes from './routes/customer.routes.js';
 import categoryRoutes from './routes/category.routes.js';
 import productRoutes from './routes/product.routes.js';
 import orderRoutes from './routes/order.routes.js';
+import retailerOrderRoutes from './routes/retailer.order.routes.js'; // Add this import
 import paymentRoutes from './routes/payment.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import locationRoutes from './routes/location.routes.js';
@@ -26,11 +25,13 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 connectDB();
 
+// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/customer', customerRoutes);
 app.use('/api/catalog', categoryRoutes);
 app.use('/api/catalog', productRoutes);
 app.use('/api/orders', orderRoutes);
+app.use('/api/orders/retailer', retailerOrderRoutes); // Add this line
 app.use('/api/payments', paymentRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/location', locationRoutes);
@@ -64,4 +65,9 @@ const HOST = productionConfig.server.host;
 app.listen(PORT, HOST, () => {
   console.log(`✅ Server running on ${HOST}:${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`📦 Available Routes:`);
+  console.log(`   POST   /api/orders - Create order`);
+  console.log(`   GET    /api/orders - Get customer orders`);
+  console.log(`   GET    /api/orders/retailer/my-orders - Get retailer orders`);
+  console.log(`   GET    /api/orders/retailer/stats - Get retailer stats`);
 });
