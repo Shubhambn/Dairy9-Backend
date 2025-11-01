@@ -1,5 +1,3 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\order.routes.js
-
 import express from 'express';
 import {
   createOrder,
@@ -23,7 +21,15 @@ router.get('/:id', getOrderById);
 router.get('/:id/invoice', generateInvoice);
 router.put('/:id/cancel', cancelOrder);
 
-// Admin routes
-router.put('/:id/status', updateOrderStatus);
+// Admin routes for order status update
+router.put('/:id/status', (req, res, next) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'retailer') {
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied. Admin or Retailer role required.'
+    });
+  }
+  next();
+}, updateOrderStatus);
 
 export default router;

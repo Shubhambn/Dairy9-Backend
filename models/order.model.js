@@ -1,5 +1,3 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\models\order.model.js
-
 import mongoose from 'mongoose';
 
 const orderItemSchema = new mongoose.Schema({
@@ -62,7 +60,18 @@ const orderSchema = new mongoose.Schema({
   },
   assignedRetailer: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Admin'
+    ref: 'Admin',
+    index: true
+  },
+  assignmentDetails: {
+    assignedAt: {
+      type: Date,
+      default: Date.now
+    },
+    distance: Number,
+    retailerName: String,
+    retailerShop: String,
+    serviceRadius: Number
   },
   deliveryTime: String,
   paymentStatus: {
@@ -88,6 +97,11 @@ const orderSchema = new mongoose.Schema({
 }, { 
   timestamps: true 
 });
+
+// Indexes for better performance
+orderSchema.index({ assignedRetailer: 1, orderStatus: 1 });
+orderSchema.index({ customer: 1, createdAt: -1 });
+orderSchema.index({ orderStatus: 1 });
 
 const Order = mongoose.model('Order', orderSchema);
 export default Order;

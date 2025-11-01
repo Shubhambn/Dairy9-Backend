@@ -1,5 +1,3 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\utils\locationUtils.js
-
 // Utility functions for location-based operations
 
 /**
@@ -51,18 +49,29 @@ export function findNearbyRetailers(customerLat, customerLon, retailers, maxRadi
       continue;
     }
     
+    const retailerLat = retailer.location.coordinates.latitude;
+    const retailerLon = retailer.location.coordinates.longitude;
+    
+    // Validate coordinates
+    if (!validateCoordinates(retailerLat, retailerLon) || !validateCoordinates(customerLat, customerLon)) {
+      continue;
+    }
+    
     const distance = calculateDistance(
       customerLat,
       customerLon,
-      retailer.location.coordinates.latitude,
-      retailer.location.coordinates.longitude
+      retailerLat,
+      retailerLon
     );
     
+    const retailerServiceRadius = retailer.serviceRadius || 50;
+    
     // Check if retailer is within their service radius and customer is within max radius
-    if (distance <= Math.min(retailer.serviceRadius || 50, maxRadius)) {
+    if (distance <= retailerServiceRadius && distance <= maxRadius) {
       nearbyRetailers.push({
-        ...retailer,
-        distance: Math.round(distance * 100) / 100 // Round to 2 decimal places
+        retailer: retailer, // Keep the original retailer object
+        distance: Math.round(distance * 100) / 100, // Round to 2 decimal places
+        isWithinRadius: true
       });
     }
   }
@@ -77,7 +86,7 @@ export function findNearbyRetailers(customerLat, customerLon, retailers, maxRadi
  * @param {number} customerLon - Customer longitude
  * @param {Array} retailers - Array of retailer objects with location data
  * @param {number} maxRadius - Maximum radius in kilometers (default: 50)
- * @returns {Object|null} Closest retailer or null if none found
+ * @returns {Object|null} Closest retailer info or null if none found
  */
 export function getClosestRetailer(customerLat, customerLon, retailers, maxRadius = 50) {
   const nearbyRetailers = findNearbyRetailers(customerLat, customerLon, retailers, maxRadius);
@@ -100,3 +109,33 @@ export function validateCoordinates(latitude, longitude) {
     longitude <= 180
   );
 }
+
+
+// Add this function to handle reverse geocoding without API key
+export const reverseGeocode = async (latitude, longitude) => {
+  try {
+    // If no Google Maps API key is available, return a formatted address manually
+    if (!process.env.GOOGLE_MAPS_API_KEY) {
+      console.log('Google Maps API key not available, using manual address formatting');
+      return {
+        formattedAddress: `Location at ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`,
+        city: '',
+        state: '',
+        pincode: ''
+      };
+    }
+
+    // Your existing reverse geocoding code here...
+    // This will only run if API key is available
+    
+  } catch (error) {
+    console.error('Reverse geocoding failed:', error.message);
+    // Return fallback address format
+    return {
+      formattedAddress: `Location at ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`,
+      city: '',
+      state: '',
+      pincode: ''
+    };
+  }
+};
