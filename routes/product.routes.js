@@ -36,10 +36,10 @@ router.post('/products/:id/images', auth, upload.array('images', 5), uploadProdu
 router.delete('/products/:id/images/:imageId', auth, deleteProductImage);
 
 // Generate QR for a product
-router.post("/generate/:id", generateProductQR);
+router.post("/products/generate/:id", generateProductQR);
 
 // Scan and get product info
-router.post("/scan", scanProductQR);
+router.post("/products/scan", scanProductQR);
 
 // Add this to your routes for testing
 router.get('/test-cloudinary', async (req, res) => {
