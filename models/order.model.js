@@ -16,7 +16,15 @@ const orderItemSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
-  unit: String
+  unit: String,
+    reservedQuantity: {
+    type: Number,
+    default: 0
+  },
+  isReserved: {
+    type: Boolean,
+    default: false
+  }
 });
 
 const orderSchema = new mongoose.Schema({
@@ -84,6 +92,14 @@ const orderSchema = new mongoose.Schema({
     enum: ['cash', 'card', 'upi', 'wallet'],
     default: 'cash'
   },
+  reservationStatus: {
+    type: String,
+    enum: ['not_reserved', 'reserved', 'delivered', 'cancelled', 'released'],
+    default: 'not_reserved'
+  },
+  reservationDate: Date,
+  releaseDate: Date,
+  cancellationReason: String,
   orderStatus: {
     type: String,
     enum: ['pending', 'confirmed', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'],
