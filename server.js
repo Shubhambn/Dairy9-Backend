@@ -1,28 +1,35 @@
+// server.js - SIMPLIFIED VERSION
 import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import connectDB from './config/db.js';
 import { productionConfig } from './config/production.js';
+
+// Import routes
 import authRoutes from './routes/auth.routes.js';
 import customerRoutes from './routes/customer.routes.js';
 import categoryRoutes from './routes/category.routes.js';
 import productRoutes from './routes/product.routes.js';
 import orderRoutes from './routes/order.routes.js';
-import retailerOrderRoutes from './routes/retailer.order.routes.js'; // Add this import
+import retailerOrderRoutes from './routes/retailer.order.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import locationRoutes from './routes/location.routes.js';
 
+// Import inventory routes (NEW)
+import inventoryRoutes from './routes/inventory.routes.js';
+
 dotenv.config();
 const app = express();
 
-// CORS configuration
+// Basic CORS configuration (use your existing one)
 app.use(cors(productionConfig.cors));
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Connect to database
 connectDB();
 
 // Routes
@@ -31,15 +38,27 @@ app.use('/api/customer', customerRoutes);
 app.use('/api/catalog', categoryRoutes);
 app.use('/api/catalog', productRoutes);
 app.use('/api/orders', orderRoutes);
-app.use('/api/orders/retailer', retailerOrderRoutes); // Add this line
+app.use('/api/orders/retailer', retailerOrderRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/location', locationRoutes);
+
+// 👇 ADD INVENTORY ROUTES
+app.use('/api/retailer/inventory', inventoryRoutes);
 
 app.get('/', (req, res) => res.json({ 
   message: 'Dairy9 Backend Running',
   timestamp: new Date().toISOString()
 }));
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Server is healthy',
+    timestamp: new Date().toISOString()
+  });
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -65,9 +84,4 @@ const HOST = productionConfig.server.host;
 app.listen(PORT, HOST, () => {
   console.log(`✅ Server running on ${HOST}:${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📦 Available Routes:`);
-  console.log(`   POST   /api/orders - Create order`);
-  console.log(`   GET    /api/orders - Get customer orders`);
-  console.log(`   GET    /api/orders/retailer/my-orders - Get retailer orders`);
-  console.log(`   GET    /api/orders/retailer/stats - Get retailer stats`);
 });

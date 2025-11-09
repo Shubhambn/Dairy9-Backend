@@ -1,45 +1,35 @@
-// C:\Users\ADMIN\Desktop\d9\Dairy9-Backend\controllers\order.controller.js
-
+// controllers/order.controller.js
+import mongoose from 'mongoose';
 import Customer from '../models/customer.model.js';
 import Order from '../models/order.model.js';
 import Product from '../models/product.model.js';
 import Admin from '../models/admin.model.js';
 import { getClosestRetailer, validateCoordinates, calculateDistance } from '../utils/locationUtils.js';
+import inventoryService from '../services/inventory.service.js';
 
 // Generate unique order ID
 const generateOrderId = () => {
   return 'ORD' + Date.now() + Math.floor(Math.random() * 1000);
 };
 
-// Helper function to get coordinates from address using geocoding
-const getCoordinatesFromAddress = async (address) => {
-  try {
-    // You can integrate with a geocoding service here
-    // For now, we'll return null and handle it gracefully
-    console.log('Geocoding not implemented for address:', address.formattedAddress);
-    return null;
-  } catch (error) {
-    console.error('Geocoding error:', error);
-    return null;
-  }
-};
-
 // Helper function to find order by ID (supports both orderId string and MongoDB _id)
 const findOrderById = async (orderIdentifier) => {
-  // Check if the ID looks like an orderId (starts with ORD)
   if (orderIdentifier.startsWith('ORD')) {
     return await Order.findOne({ orderId: orderIdentifier });
   } else {
-    // Otherwise treat it as MongoDB _id
     return await Order.findById(orderIdentifier);
   }
 };
 
-// @desc    Create new order
+// @desc    Create new order WITH INVENTORY RESERVATION
 // @route   POST /api/orders
 // @access  Private
 export const createOrder = async (req, res) => {
+  const session = await mongoose.startSession(); // 👈 ADD SESSION
+  
   try {
+    session.startTransaction(); // 👈 START TRANSACTION
+
     const userId = req.user._id;
     const { 
       items, 
@@ -52,6 +42,7 @@ export const createOrder = async (req, res) => {
     // Get customer profile
     const customer = await Customer.findOne({ user: userId });
     if (!customer) {
+      await session.abortTransaction();
       return res.status(404).json({
         success: false,
         message: 'Customer profile not found. Please complete your profile first.'
@@ -62,9 +53,11 @@ export const createOrder = async (req, res) => {
     let totalAmount = 0;
     const orderItems = [];
 
+    // 👇 REMOVE OLD STOCK CHECK - We'll check retailer inventory instead
     for (const item of items) {
       const product = await Product.findById(item.productId);
       if (!product) {
+        await session.abortTransaction();
         return res.status(400).json({
           success: false,
           message: `Product not found: ${item.productId}`
@@ -72,18 +65,14 @@ export const createOrder = async (req, res) => {
       }
 
       if (!product.isAvailable) {
+        await session.abortTransaction();
         return res.status(400).json({
           success: false,
           message: `Product not available: ${product.name}`
         });
       }
 
-      if (product.stock < item.quantity) {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock for ${product.name}. Available: ${product.stock}`
-        });
-      }
+      // ✅ REMOVE: product.stock check - we'll check retailer inventory
 
       const itemTotal = product.price * item.quantity;
       totalAmount += itemTotal;
@@ -92,7 +81,9 @@ export const createOrder = async (req, res) => {
         product: product._id,
         quantity: item.quantity,
         price: product.price,
-        unit: product.unit
+        unit: product.unit,
+        reservedQuantity: 0, // 👈 ADD RESERVATION TRACKING
+        isReserved: false    // 👈 ADD RESERVATION STATUS
       });
     }
 
@@ -104,6 +95,7 @@ export const createOrder = async (req, res) => {
     const addressToUse = deliveryAddress || customer.deliveryAddress;
     
     if (!addressToUse) {
+      await session.abortTransaction();
       return res.status(400).json({
         success: false,
         message: 'Delivery address is required. Please add a delivery address to your profile or provide one during checkout.'
@@ -112,8 +104,8 @@ export const createOrder = async (req, res) => {
 
     let customerLocation = addressToUse.coordinates;
     
-    // If coordinates are missing, we cannot validate radius, so we should not assign
     if (!customerLocation || !customerLocation.latitude || !customerLocation.longitude) {
+      await session.abortTransaction();
       console.log('Coordinates missing in delivery address');
       return res.status(400).json({
         success: false,
@@ -123,6 +115,7 @@ export const createOrder = async (req, res) => {
     } else {
       // Validate customer coordinates
       if (!validateCoordinates(customerLocation.latitude, customerLocation.longitude)) {
+        await session.abortTransaction();
         return res.status(400).json({
           success: false,
           message: 'Invalid delivery address coordinates'
@@ -133,6 +126,7 @@ export const createOrder = async (req, res) => {
       const retailers = await Admin.find({ isActive: true });
       
       if (retailers.length === 0) {
+        await session.abortTransaction();
         return res.status(400).json({
           success: false,
           message: 'No active retailers available at the moment'
@@ -144,7 +138,7 @@ export const createOrder = async (req, res) => {
         customerLocation.latitude,
         customerLocation.longitude,
         retailers,
-        100 // 100km max radius
+        100 // 50km max radius
       );
       
       if (closestRetailerInfo && closestRetailerInfo.retailer) {
@@ -158,16 +152,26 @@ export const createOrder = async (req, res) => {
         
         console.log(`Order assigned to retailer: ${closestRetailerInfo.retailer.shopName} (${closestRetailerInfo.distance}km away)`);
       } else {
+        await session.abortTransaction();
         console.log('No retailer found within service radius');
-        
-        // Don't assign to fallback retailer if none is within radius
-        // This ensures orders are only assigned to retailers who can actually service them
         return res.status(400).json({
           success: false,
           message: 'No retailer available within your delivery area. Please try a different address or contact customer support.',
           suggestion: 'No active retailer found within the service radius for your delivery location.'
         });
       }
+    }
+
+    // 👇 CHECK RETAILER INVENTORY AVAILABILITY
+    const stockCheck = await inventoryService.checkStockAvailability(assignedRetailer, items);
+    if (!stockCheck.allAvailable) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Some items are out of stock with the assigned retailer',
+        stockDetails: stockCheck.items,
+        retailer: assignmentDetails.retailerShop
+      });
     }
 
     // Create order
@@ -181,29 +185,84 @@ export const createOrder = async (req, res) => {
       deliveryTime: deliveryTime || customer.preferences?.deliveryTime,
       paymentMethod: paymentMethod || 'cash',
       specialInstructions,
-      deliveryDate: new Date(Date.now() + 24 * 60 * 60 * 1000), // Next day delivery
+      deliveryDate: new Date(Date.now() + 24 * 60 * 60 * 1000),
       assignedRetailer,
-      assignmentDetails
+      assignmentDetails,
+      reservationStatus: 'not_reserved', // 👈 ADD RESERVATION STATUS
+      orderStatus: 'pending'
     });
 
-    await order.save();
-    
-    // Populate order for response
-    await order.populate('items.product', 'name image unit');
-    await order.populate('assignedRetailer', 'shopName fullName contactNumber');
+    await order.save({ session });
 
-    res.status(201).json({
-      success: true,
-      message: 'Order created successfully',
-      order
-    });
+    // 👇 RESERVE STOCK IN RETAILER INVENTORY
+    try {
+      const reservationResult = await inventoryService.reserveStockForOrder(
+        order._id,
+        assignedRetailer,
+        items,
+        req.user._id
+      );
+
+      // Update order with reservation status
+      order.reservationStatus = 'reserved';
+      order.reservationDate = new Date();
+      
+      // Update order items with reservation info
+      order.items.forEach((item, index) => {
+        item.reservedQuantity = items[index].quantity;
+        item.isReserved = true;
+      });
+
+      await order.save({ session });
+      await session.commitTransaction(); // 👈 COMMIT TRANSACTION
+
+      // Populate order for response
+      await order.populate('items.product', 'name image unit');
+      await order.populate('assignedRetailer', 'shopName fullName contactNumber');
+
+      res.status(201).json({
+        success: true,
+        message: 'Order created successfully and stock reserved',
+        order: {
+          _id: order._id,
+          orderId: order.orderId,
+          totalAmount: order.totalAmount,
+          finalAmount: order.finalAmount,
+          orderStatus: order.orderStatus,
+          reservationStatus: order.reservationStatus,
+          assignedRetailer: order.assignedRetailer,
+          items: order.items,
+          reservationDetails: {
+            reservedItems: reservationResult.reservedItems.length,
+            message: reservationResult.message
+          }
+        }
+      });
+
+    } catch (reservationError) {
+      // If reservation fails, delete the order
+      await Order.findByIdAndDelete(order._id).session(session);
+      await session.abortTransaction();
+      
+      console.error('Stock reservation failed:', reservationError);
+      
+      res.status(400).json({
+        success: false,
+        message: 'Order creation failed: Could not reserve stock. ' + reservationError.message,
+        suggestion: 'Please try again or contact customer support.'
+      });
+    }
+
   } catch (error) {
+    await session.abortTransaction();
     console.error('Create Order Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error',
+      message: 'Server error while creating order',
       error: error.message
     });
+  } finally {
+    session.endSession(); // 👈 END SESSION
   }
 };
 
@@ -311,13 +370,14 @@ export const getOrderById = async (req, res) => {
   }
 };
 
-// @desc    Cancel order
+// @desc    Cancel order AND RELEASE RESERVED STOCK
 // @route   PUT /api/orders/:id/cancel
 // @access  Private
 export const cancelOrder = async (req, res) => {
   try {
     const userId = req.user._id;
     const orderIdentifier = req.params.id;
+    const { reason = 'Customer cancellation' } = req.body;
 
     const customer = await Customer.findOne({ user: userId });
     if (!customer) {
@@ -353,13 +413,34 @@ export const cancelOrder = async (req, res) => {
       });
     }
 
+    // 👇 RELEASE RESERVED STOCK if order was reserved
+    let stockReleaseResult = null;
+    if (order.reservationStatus === 'reserved') {
+      stockReleaseResult = await inventoryService.cancelOrderReservation(
+        order._id,
+        order.assignedRetailer,
+        req.user._id,
+        reason
+      );
+    }
+
+    // Update order status
     order.orderStatus = 'cancelled';
+    order.reservationStatus = 'released';
+    order.releaseDate = new Date();
+    order.cancellationReason = reason;
     await order.save();
 
     res.status(200).json({
       success: true,
-      message: 'Order cancelled successfully',
-      order
+      message: 'Order cancelled successfully and reserved stock released',
+      order: {
+        _id: order._id,
+        orderId: order.orderId,
+        orderStatus: order.orderStatus,
+        reservationStatus: order.reservationStatus
+      },
+      stockReleased: stockReleaseResult
     });
   } catch (error) {
     console.error('Cancel Order Error:', error);
@@ -371,7 +452,7 @@ export const cancelOrder = async (req, res) => {
   }
 };
 
-// @desc    Update order status (Admin/Retailer)
+// @desc    Update order status WITH INVENTORY HANDLING
 // @route   PUT /api/orders/:id/status
 // @access  Private/Admin/Retailer
 export const updateOrderStatus = async (req, res) => {
@@ -420,6 +501,46 @@ export const updateOrderStatus = async (req, res) => {
     }
 
     console.log('Found order:', order._id, 'current status:', order.orderStatus);
+
+    // 👇 HANDLE DELIVERY - DEDUCT RESERVED STOCK
+    if (status === 'delivered' && order.orderStatus !== 'delivered') {
+      if (order.reservationStatus === 'reserved') {
+        try {
+          const deliveryResult = await inventoryService.confirmOrderDelivery(
+            order._id,
+            order.assignedRetailer,
+            req.user._id
+          );
+          console.log('Stock deducted on delivery:', deliveryResult);
+          order.reservationStatus = 'delivered';
+        } catch (deliveryError) {
+          console.error('Failed to deduct stock on delivery:', deliveryError);
+          return res.status(400).json({
+            success: false,
+            message: 'Failed to update inventory: ' + deliveryError.message
+          });
+        }
+      }
+    }
+
+    // 👇 HANDLE CANCELLATION - RELEASE RESERVED STOCK
+    if (status === 'cancelled' && order.orderStatus !== 'cancelled') {
+      if (order.reservationStatus === 'reserved') {
+        try {
+          const releaseResult = await inventoryService.cancelOrderReservation(
+            order._id,
+            order.assignedRetailer,
+            req.user._id,
+            'Status update cancellation'
+          );
+          console.log('Stock released on cancellation:', releaseResult);
+          order.reservationStatus = 'released';
+        } catch (releaseError) {
+          console.error('Failed to release stock on cancellation:', releaseError);
+          // Continue with cancellation even if stock release fails
+        }
+      }
+    }
 
     order.orderStatus = status;
     
@@ -587,11 +708,190 @@ export const getRetailerOrderStats = async (req, res) => {
   }
 };
 
-
-
-// @desc    Get retailer's active orders (non-delivered, non-cancelled)
-// @route   GET /api/orders/retailer/active-orders
+// @desc    Update order status by retailer WITH INVENTORY HANDLING
+// @route   PUT /api/orders/retailer/:id/status
 // @access  Private/Retailer
+export const updateOrderStatusByRetailer = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { status } = req.body;
+    const orderIdentifier = req.params.id;
+
+    console.log('Retailer updating order status:', { retailerId: userId, orderIdentifier, status });
+
+    const validStatuses = ['confirmed', 'preparing', 'out_for_delivery', 'delivered'];
+    
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid order status for retailer'
+      });
+    }
+
+    // Verify retailer exists
+    const retailer = await Admin.findOne({ user: userId });
+    if (!retailer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Retailer profile not found'
+      });
+    }
+
+    // Use helper function to find order
+    const order = await findOrderById(orderIdentifier);
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    // Check if order is assigned to this retailer
+    if (!order.assignedRetailer || order.assignedRetailer.toString() !== retailer._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Order not assigned to you'
+      });
+    }
+
+    // Validate status transition
+    const statusFlow = {
+      pending: ['confirmed', 'cancelled'],
+      confirmed: ['preparing', 'cancelled'],
+      preparing: ['out_for_delivery'],
+      out_for_delivery: ['delivered']
+    };
+
+    if (!statusFlow[order.orderStatus]?.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot change status from ${order.orderStatus} to ${status}`
+      });
+    }
+
+    // 👇 HANDLE DELIVERY - DEDUCT RESERVED STOCK
+    if (status === 'delivered' && order.reservationStatus === 'reserved') {
+      try {
+        const deliveryResult = await inventoryService.confirmOrderDelivery(
+          order._id,
+          order.assignedRetailer,
+          req.user._id
+        );
+        console.log('Stock deducted on delivery:', deliveryResult);
+        order.reservationStatus = 'delivered';
+      } catch (deliveryError) {
+        console.error('Failed to deduct stock on delivery:', deliveryError);
+        return res.status(400).json({
+          success: false,
+          message: 'Failed to update inventory: ' + deliveryError.message
+        });
+      }
+    }
+
+    order.orderStatus = status;
+    
+    // If delivered, set delivered at timestamp
+    if (status === 'delivered') {
+      order.deliveredAt = new Date();
+    }
+
+    await order.save();
+
+    // Populate for response
+    await order.populate('items.product', 'name image unit');
+    await order.populate('customer', 'personalInfo.fullName');
+
+    res.status(200).json({
+      success: true,
+      message: 'Order status updated successfully',
+      order
+    });
+  } catch (error) {
+    console.error('Update Order Status by Retailer Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Mark order as delivered and deduct stock (SPECIFIC ENDPOINT)
+// @route   PUT /api/orders/:id/deliver
+// @access  Private/Retailer/Admin
+export const markOrderDelivered = async (req, res) => {
+  try {
+    const orderIdentifier = req.params.id;
+
+    const order = await findOrderById(orderIdentifier);
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    // Verify the retailer is authorized to update this order
+    if (req.user.role === 'retailer') {
+      const retailer = await Admin.findOne({ user: req.user._id });
+      if (!retailer || order.assignedRetailer.toString() !== retailer._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to update this order'
+        });
+      }
+    }
+
+    if (order.orderStatus === 'delivered') {
+      return res.status(400).json({
+        success: false,
+        message: 'Order is already delivered'
+      });
+    }
+
+    if (order.reservationStatus !== 'reserved') {
+      return res.status(400).json({
+        success: false,
+        message: 'Order stock is not reserved'
+      });
+    }
+
+    // DEDUCT STOCK from retailer inventory
+    const deliveryResult = await inventoryService.confirmOrderDelivery(
+      order._id,
+      order.assignedRetailer,
+      req.user._id
+    );
+
+    // Update order status
+    order.orderStatus = 'delivered';
+    order.reservationStatus = 'delivered';
+    order.deliveredAt = new Date();
+    await order.save();
+
+    res.json({
+      success: true,
+      message: 'Order marked as delivered and stock updated',
+      order: {
+        _id: order._id,
+        orderId: order.orderId,
+        orderStatus: order.orderStatus,
+        reservationStatus: order.reservationStatus,
+        deliveredAt: order.deliveredAt
+      },
+      inventoryUpdate: deliveryResult
+    });
+
+  } catch (error) {
+    console.error('Mark order delivered error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to mark order as delivered',
+      error: error.message
+    });
+  }
+};
 export const getRetailerActiveOrders = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -656,9 +956,6 @@ export const getRetailerActiveOrders = async (req, res) => {
   }
 };
 
-// @desc    Get retailer's order history (ALL orders - no status filtering)
-// @route   GET /api/orders/retailer/order-history
-// @access  Private/Retailer
 export const getRetailerOrderHistory = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -720,93 +1017,3 @@ export const getRetailerOrderHistory = async (req, res) => {
   }
 };
 
-
-// @desc    Update order status by retailer
-// @route   PUT /api/orders/retailer/:id/status
-// @access  Private/Retailer
-export const updateOrderStatusByRetailer = async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const { status } = req.body;
-    const orderIdentifier = req.params.id;
-
-    console.log('Retailer updating order status:', { retailerId: userId, orderIdentifier, status });
-
-    const validStatuses = ['confirmed', 'preparing', 'out_for_delivery', 'delivered'];
-    
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid order status for retailer'
-      });
-    }
-
-    // Verify retailer exists
-    const retailer = await Admin.findOne({ user: userId });
-    if (!retailer) {
-      return res.status(404).json({
-        success: false,
-        message: 'Retailer profile not found'
-      });
-    }
-
-    // Use helper function to find order
-    const order = await findOrderById(orderIdentifier);
-
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
-    }
-
-    // Check if order is assigned to this retailer
-    if (!order.assignedRetailer || order.assignedRetailer.toString() !== retailer._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: 'Order not assigned to you'
-      });
-    }
-
-    // Validate status transition
-    const statusFlow = {
-      pending: ['confirmed', 'cancelled'],
-      confirmed: ['preparing', 'cancelled'],
-      preparing: ['out_for_delivery'],
-      out_for_delivery: ['delivered']
-    };
-
-    if (!statusFlow[order.orderStatus]?.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot change status from ${order.orderStatus} to ${status}`
-      });
-    }
-
-    order.orderStatus = status;
-    
-    // If delivered, set delivered at timestamp
-    if (status === 'delivered') {
-      order.deliveredAt = new Date();
-    }
-
-    await order.save();
-
-    // Populate for response
-    await order.populate('items.product', 'name image unit');
-    await order.populate('customer', 'personalInfo.fullName');
-
-    res.status(200).json({
-      success: true,
-      message: 'Order status updated successfully',
-      order
-    });
-  } catch (error) {
-    console.error('Update Order Status by Retailer Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error',
-      error: error.message
-    });
-  }
-};

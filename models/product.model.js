@@ -77,8 +77,7 @@ const productSchema = new mongoose.Schema({
   rating: {
     average: { type: Number, default: 0 },
     count: { type: Number, default: 0 }
-  }
-  ,
+  },
   qrCodeUrl: { 
     type: String 
   },    // URL or path to the generated QR image
@@ -94,9 +93,22 @@ const productSchema = new mongoose.Schema({
   timestamps: true 
 });
 
-// Calculate discounted price
+// Calculate discounted price - CORRECTED LOGIC
 productSchema.virtual('discountedPrice').get(function() {
-  return this.price - (this.price * this.discount / 100);
+  if (this.discount > 0) {
+    return this.price * (1 - this.discount / 100);
+  }
+  return this.price;
+});
+
+// Calculate discount amount (optional but useful)
+productSchema.virtual('discountAmount').get(function() {
+  return this.price * (this.discount / 100);
+});
+
+// Check if product is on sale
+productSchema.virtual('isOnSale').get(function() {
+  return this.discount > 0;
 });
 
 // Convert to JSON with virtuals

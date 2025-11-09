@@ -7,10 +7,10 @@ import {
   updateOrderStatus,
   getRetailerActiveOrders,
   getRetailerOrderHistory
-
 } from '../controllers/order.controller.js';
 import { generateInvoice } from '../controllers/invoice.controller.js';
 import auth from '../middlewares/auth.js';
+
 
 const router = express.Router();
 
@@ -23,6 +23,8 @@ router.get('/', getCustomerOrders);
 router.get('/:id', getOrderById);
 router.get('/:id/invoice', generateInvoice);
 router.put('/:id/cancel', cancelOrder);
+router.get('/retailer/active-orders', getRetailerActiveOrders);
+router.get('/retailer/order-history',  getRetailerOrderHistory);
 
 // Add these routes to your order routes
 router.get('/retailer/active-orders', getRetailerActiveOrders);
