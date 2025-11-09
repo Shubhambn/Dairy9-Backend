@@ -1,3 +1,5 @@
+// C:\Users\ADMIN\Desktop\d9\Dairy9-Backend\controllers\retailer.controller.js
+
 import Admin from '../models/admin.model.js';
 import Order from '../models/order.model.js';
 import User from '../models/user.model.js';
@@ -225,37 +227,57 @@ export const getRetailerOrders = async (req, res) => {
       filter.orderStatus = status;
     }
 
-    const orders = await Order.find(filter)
+    // Get all orders assigned to this retailer
+    const allOrders = await Order.find(filter)
       .populate('customer', 'personalInfo.fullName deliveryAddress')
       .populate('items.product', 'name price unit image')
       .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
       .lean();
 
-    // Add distance information to each order if retailer has location
-    const ordersWithDistance = orders.map(order => {
-      let distance = null;
-      
-      if (retailer.location?.coordinates && order.customer?.deliveryAddress?.coordinates) {
+    // Filter orders by retailer's service radius if location is available
+    let ordersWithinRadius = allOrders;
+    if (retailer.location?.coordinates && retailer.serviceRadius) {
+      ordersWithinRadius = allOrders.filter(order => {
+        if (!order.customer?.deliveryAddress?.coordinates) {
+          // If customer address coordinates are missing, exclude the order
+          return false;
+        }
+
         const retailerLat = retailer.location.coordinates.latitude;
         const retailerLon = retailer.location.coordinates.longitude;
         const customerLat = order.customer.deliveryAddress.coordinates.latitude;
         const customerLon = order.customer.deliveryAddress.coordinates.longitude;
 
-        distance = calculateDistance(retailerLat, retailerLon, customerLat, customerLon);
-        distance = Math.round(distance * 100) / 100; // Round to 2 decimal places
-      }
+        const distance = calculateDistance(retailerLat, retailerLon, customerLat, customerLon);
+        return distance <= retailer.serviceRadius;
+      });
+    }
 
-      return {
-        ...order,
-        distance,
-        customerName: order.customer?.personalInfo?.fullName || 'N/A',
-        deliveryAddress: order.deliveryAddress || order.customer?.deliveryAddress
-      };
-    });
+    // Add distance information and apply pagination
+    const ordersWithDistance = ordersWithinRadius
+      .map(order => {
+        let distance = null;
+        
+        if (retailer.location?.coordinates && order.customer?.deliveryAddress?.coordinates) {
+          const retailerLat = retailer.location.coordinates.latitude;
+          const retailerLon = retailer.location.coordinates.longitude;
+          const customerLat = order.customer.deliveryAddress.coordinates.latitude;
+          const customerLon = order.customer.deliveryAddress.coordinates.longitude;
 
-    const total = await Order.countDocuments(filter);
+          distance = calculateDistance(retailerLat, retailerLon, customerLat, customerLon);
+          distance = Math.round(distance * 100) / 100; // Round to 2 decimal places
+        }
+
+        return {
+          ...order,
+          distance,
+          customerName: order.customer?.personalInfo?.fullName || 'N/A',
+          deliveryAddress: order.deliveryAddress || order.customer?.deliveryAddress
+        };
+      })
+      .slice((page - 1) * limit, page * limit); // Apply pagination after filtering
+
+    const total = ordersWithinRadius.length;
 
     res.json({
       success: true,
@@ -268,7 +290,9 @@ export const getRetailerOrders = async (req, res) => {
       pagination: {
         currentPage: parseInt(page),
         totalPages: Math.ceil(total / limit),
-        totalOrders: total
+        totalOrders: total,
+        totalAssigned: allOrders.length,
+        withinRadius: ordersWithinRadius.length
       }
     });
   } catch (error) {
@@ -304,7 +328,15 @@ export const getAvailableOrders = async (req, res) => {
       });
     }
 
+    if (!retailer.serviceRadius || retailer.serviceRadius <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Service radius not set. Please set your service radius first.'
+      });
+    }
+
     // Find unassigned orders or orders assigned to this retailer
+    // Don't apply pagination yet - we need to filter by radius first
     const filter = {
       $or: [
         { assignedRetailer: null },
@@ -313,17 +345,15 @@ export const getAvailableOrders = async (req, res) => {
       orderStatus: { $in: ['pending', 'confirmed'] }
     };
 
-    const orders = await Order.find(filter)
+    const allOrders = await Order.find(filter)
       .populate('customer', 'personalInfo.fullName deliveryAddress')
       .populate('items.product', 'name price unit')
       .populate('assignedRetailer', 'shopName')
       .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
       .lean();
 
     // Filter orders within retailer's service radius
-    const nearbyOrders = orders.filter(order => {
+    const nearbyOrders = allOrders.filter(order => {
       if (!order.customer?.deliveryAddress?.coordinates) {
         return false;
       }
@@ -357,21 +387,26 @@ export const getAvailableOrders = async (req, res) => {
     // Sort by distance (closest first)
     ordersWithDistance.sort((a, b) => a.distance - b.distance);
 
-    const totalAvailable = await Order.countDocuments(filter);
+    // Apply pagination after filtering and sorting
+    const paginatedOrders = ordersWithDistance.slice(
+      (page - 1) * limit,
+      page * limit
+    );
 
     res.json({
       success: true,
-      orders: ordersWithDistance,
+      orders: paginatedOrders,
       currentRadius: retailer.serviceRadius,
       stats: {
-        totalAvailable: totalAvailable,
+        totalAvailable: allOrders.length,
         ordersWithinRadius: ordersWithDistance.length,
         radius: retailer.serviceRadius
       },
       pagination: {
         currentPage: parseInt(page),
         totalPages: Math.ceil(ordersWithDistance.length / limit),
-        totalOrders: ordersWithDistance.length
+        totalOrders: ordersWithDistance.length,
+        showing: paginatedOrders.length
       }
     });
   } catch (error) {
@@ -475,6 +510,21 @@ export const assignOrderToRetailer = async (req, res) => {
       });
     }
 
+    // Check if retailer has location and service radius set
+    if (!retailer.location?.coordinates) {
+      return res.status(400).json({
+        success: false,
+        message: 'Retailer location not set. Please update your location first.'
+      });
+    }
+
+    if (!retailer.serviceRadius || retailer.serviceRadius <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Service radius not set. Please set your service radius first.'
+      });
+    }
+
     const order = await Order.findById(orderId)
       .populate('customer', 'personalInfo.fullName deliveryAddress');
     
@@ -493,22 +543,38 @@ export const assignOrderToRetailer = async (req, res) => {
       });
     }
 
-    // Calculate distance if both locations are available
-    let distance = null;
-    if (retailer.location?.coordinates && order.customer?.deliveryAddress?.coordinates) {
-      const retailerLat = retailer.location.coordinates.latitude;
-      const retailerLon = retailer.location.coordinates.longitude;
-      const customerLat = order.customer.deliveryAddress.coordinates.latitude;
-      const customerLon = order.customer.deliveryAddress.coordinates.longitude;
+    // Check if customer delivery address has coordinates
+    if (!order.customer?.deliveryAddress?.coordinates) {
+      return res.status(400).json({
+        success: false,
+        message: 'Customer delivery address coordinates are missing. Cannot verify if order is within service radius.'
+      });
+    }
 
-      distance = calculateDistance(retailerLat, retailerLon, customerLat, customerLon);
+    // Calculate distance and verify if order is within retailer's service radius
+    const retailerLat = retailer.location.coordinates.latitude;
+    const retailerLon = retailer.location.coordinates.longitude;
+    const customerLat = order.customer.deliveryAddress.coordinates.latitude;
+    const customerLon = order.customer.deliveryAddress.coordinates.longitude;
+
+    const distance = calculateDistance(retailerLat, retailerLon, customerLat, customerLon);
+    const roundedDistance = Math.round(distance * 100) / 100;
+
+    // Verify order is within retailer's service radius
+    if (distance > retailer.serviceRadius) {
+      return res.status(400).json({
+        success: false,
+        message: `Order is ${roundedDistance}km away, which is outside your service radius of ${retailer.serviceRadius}km. You can only accept orders within your service radius.`,
+        distance: roundedDistance,
+        serviceRadius: retailer.serviceRadius
+      });
     }
 
     // Assign order to current retailer
     order.assignedRetailer = retailer._id;
     order.assignmentDetails = {
       assignedAt: new Date(),
-      distance: distance ? Math.round(distance * 100) / 100 : null,
+      distance: roundedDistance,
       retailerName: retailer.fullName,
       retailerShop: retailer.shopName,
       serviceRadius: retailer.serviceRadius

@@ -78,6 +78,18 @@ const productSchema = new mongoose.Schema({
     average: { type: Number, default: 0 },
     count: { type: Number, default: 0 }
   }
+  ,
+  qrCodeUrl: { 
+    type: String 
+  },    // URL or path to the generated QR image
+  qrCodeId: { 
+    type: String 
+  },
+  retailerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Retailer",
+  },    // optional unique ID if you manage QRs separately
+
 }, { 
   timestamps: true 
 });

@@ -1,8 +1,10 @@
+// C:\Users\ADMIN\Desktop\d9\Dairy9-Backend\controllers\order.controller.js
+
 import Customer from '../models/customer.model.js';
 import Order from '../models/order.model.js';
 import Product from '../models/product.model.js';
 import Admin from '../models/admin.model.js';
-import { getClosestRetailer, validateCoordinates } from '../utils/locationUtils.js';
+import { getClosestRetailer, validateCoordinates, calculateDistance } from '../utils/locationUtils.js';
 
 // Generate unique order ID
 const generateOrderId = () => {
@@ -110,30 +112,14 @@ export const createOrder = async (req, res) => {
 
     let customerLocation = addressToUse.coordinates;
     
-    // If coordinates are missing, try to get them or assign to any available retailer
+    // If coordinates are missing, we cannot validate radius, so we should not assign
     if (!customerLocation || !customerLocation.latitude || !customerLocation.longitude) {
-      console.log('Coordinates missing in delivery address, attempting to assign retailer...');
-      
-      // For now, we'll assign to any available retailer as fallback
-      const availableRetailers = await Admin.find({ isActive: true }).limit(1);
-      
-      if (availableRetailers.length > 0) {
-        assignedRetailer = availableRetailers[0]._id;
-        assignmentDetails = {
-          distance: null,
-          retailerName: availableRetailers[0].fullName,
-          retailerShop: availableRetailers[0].shopName,
-          serviceRadius: availableRetailers[0].serviceRadius,
-          note: 'Assigned without coordinates validation'
-        };
-        console.log(`Order assigned to default retailer: ${availableRetailers[0].shopName} (coordinates missing)`);
-      } else {
-        console.log('No retailers available for assignment');
-        return res.status(400).json({
-          success: false,
-          message: 'No retailers available at the moment. Please try again later.'
-        });
-      }
+      console.log('Coordinates missing in delivery address');
+      return res.status(400).json({
+        success: false,
+        message: 'Delivery address coordinates are required. Please provide a valid address with location coordinates to place an order.',
+        suggestion: 'Please update your delivery address with proper location coordinates or select your location on the map.'
+      });
     } else {
       // Validate customer coordinates
       if (!validateCoordinates(customerLocation.latitude, customerLocation.longitude)) {
@@ -172,26 +158,15 @@ export const createOrder = async (req, res) => {
         
         console.log(`Order assigned to retailer: ${closestRetailerInfo.retailer.shopName} (${closestRetailerInfo.distance}km away)`);
       } else {
-        console.log('No retailer found within service radius, trying fallback...');
+        console.log('No retailer found within service radius');
         
-        // Fallback: assign to any available retailer
-        const fallbackRetailers = await Admin.find({ isActive: true }).limit(1);
-        if (fallbackRetailers.length > 0) {
-          assignedRetailer = fallbackRetailers[0]._id;
-          assignmentDetails = {
-            distance: null,
-            retailerName: fallbackRetailers[0].fullName,
-            retailerShop: fallbackRetailers[0].shopName,
-            serviceRadius: fallbackRetailers[0].serviceRadius,
-            note: 'Fallback assignment - no retailer in radius'
-          };
-          console.log(`Order assigned to fallback retailer: ${fallbackRetailers[0].shopName}`);
-        } else {
-          return res.status(400).json({
-            success: false,
-            message: 'No retailer available in your delivery area. Please try a different address or contact customer support.'
-          });
-        }
+        // Don't assign to fallback retailer if none is within radius
+        // This ensures orders are only assigned to retailers who can actually service them
+        return res.status(400).json({
+          success: false,
+          message: 'No retailer available within your delivery area. Please try a different address or contact customer support.',
+          suggestion: 'No active retailer found within the service radius for your delivery location.'
+        });
       }
     }
 
@@ -505,28 +480,56 @@ export const getRetailerOrders = async (req, res) => {
 
     console.log('Query filter:', filter);
 
-    const orders = await Order.find(filter)
+    // Get all orders assigned to this retailer
+    const allOrders = await Order.find(filter)
       .populate('items.product', 'name image unit milkType')
       .populate('customer', 'personalInfo.fullName deliveryAddress')
       .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
+      .lean();
 
-    console.log(`Found ${orders.length} orders for retailer`);
+    console.log(`Found ${allOrders.length} total assigned orders for retailer`);
 
-    const total = await Order.countDocuments(filter);
+    // Filter orders by retailer's service radius if location is available
+    let ordersWithinRadius = allOrders;
+    if (retailer.location?.coordinates && retailer.serviceRadius) {
+      ordersWithinRadius = allOrders.filter(order => {
+        if (!order.customer?.deliveryAddress?.coordinates) {
+          // If customer address coordinates are missing, exclude the order
+          return false;
+        }
+
+        const retailerLat = retailer.location.coordinates.latitude;
+        const retailerLon = retailer.location.coordinates.longitude;
+        const customerLat = order.customer.deliveryAddress.coordinates.latitude;
+        const customerLon = order.customer.deliveryAddress.coordinates.longitude;
+
+        const distance = calculateDistance(retailerLat, retailerLon, customerLat, customerLon);
+        return distance <= retailer.serviceRadius;
+      });
+
+      console.log(`Found ${ordersWithinRadius.length} orders within ${retailer.serviceRadius}km radius`);
+    }
+
+    // Apply pagination after filtering
+    const paginatedOrders = ordersWithinRadius.slice(
+      (page - 1) * limit,
+      page * limit
+    );
 
     res.status(200).json({
       success: true,
-      orders,
+      orders: paginatedOrders,
       pagination: {
         currentPage: parseInt(page),
-        totalPages: Math.ceil(total / limit),
-        totalOrders: total
+        totalPages: Math.ceil(ordersWithinRadius.length / limit),
+        totalOrders: ordersWithinRadius.length,
+        totalAssigned: allOrders.length,
+        withinRadius: ordersWithinRadius.length
       },
       retailer: {
         shopName: retailer.shopName,
-        serviceRadius: retailer.serviceRadius
+        serviceRadius: retailer.serviceRadius,
+        hasLocation: !!retailer.location?.coordinates
       }
     });
   } catch (error) {

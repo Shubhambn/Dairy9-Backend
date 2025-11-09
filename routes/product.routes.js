@@ -14,6 +14,9 @@ import {
 } from '../controllers/product.controller.js';
 import auth from '../middlewares/auth.js';
 import upload from '../middlewares/upload.js';
+import { generateProductQR,scanProductQR  } from '../controllers/product.controller.js';
+import { testCloudinaryConnection } from '../utils/cloudinaryUpload.js'; // adjust path if needed
+
 
 const router = express.Router();
 
@@ -31,5 +34,36 @@ router.delete('/products/:id', auth, deleteProduct);
 // Image management routes
 router.post('/products/:id/images', auth, upload.array('images', 5), uploadProductImages);
 router.delete('/products/:id/images/:imageId', auth, deleteProductImage);
+
+// Generate QR for a product
+router.post("/generate/:id", generateProductQR);
+
+// Scan and get product info
+router.post("/scan", scanProductQR);
+
+// Add this to your routes for testing
+router.get('/test-cloudinary', async (req, res) => {
+  try {
+    const cloudinaryConnected = await testCloudinaryConnection();
+    if (cloudinaryConnected) {
+      res.json({ 
+        success: true, 
+        message: 'Cloudinary is properly configured' 
+      });
+    } else {
+      res.status(503).json({ 
+        success: false, 
+        message: 'Cloudinary configuration issue' 
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      message: 'Cloudinary test failed',
+      error: error.message 
+    });
+  }
+});
+
 
 export default router;
