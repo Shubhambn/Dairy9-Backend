@@ -5,14 +5,32 @@ import InventoryService from '../services/inventory.service.js';
 import Admin from '../models/admin.model.js';
 
 // Validation rules
+// CORRECT VALIDATION MIDDLEWARE - Update this
 export const validateStockUpdate = [
-  body('productId').isMongoId().withMessage('Valid product ID is required'),
-  body('quantity').isInt({ min: 1 }).withMessage('Quantity must be a positive integer'),
-  body('transactionType').isIn(['STOCK_IN', 'STOCK_OUT', 'STOCK_ADJUSTMENT', 'COMMITMENT', 'RELEASE_COMMITMENT'])
+  body('productId')
+    .isMongoId()
+    .withMessage('Valid product ID is required'),
+  
+  body('quantity')
+    .isInt({ min: 1 })
+    .withMessage('Quantity must be a positive integer'),
+  
+  body('transactionType')
+    .isIn(['STOCK_IN', 'STOCK_OUT', 'STOCK_ADJUSTMENT', 'STOCK_TRANSFER', 'STOCK_TAKE', 'COMMITMENT', 'RELEASE_COMMITMENT', 'DAMAGE', 'EXPIRY', 'RETURN'])
     .withMessage('Valid transaction type is required'),
-  body('reason').isIn(['SALE', 'PURCHASE', 'DAMAGED', 'EXPIRED', 'ADJUSTMENT', 'RETURN', 'INITIAL'])
-    .withMessage('Valid reason is required'),
-  body('notes').optional().isString().isLength({ max: 500 }).withMessage('Notes must be less than 500 characters')
+  
+  body('reason')
+    .isIn([
+      // Stock In Reasons
+      'PURCHASE', 'RETURN', 'TRANSFER_IN', 'PRODUCTION', 'ADJUSTMENT_IN',
+      // Stock Out Reasons  
+      'SALE', 'DAMAGE', 'EXPIRY', 'TRANSFER_OUT', 'SAMPLE', 'ADJUSTMENT_OUT',
+      // Commitment Reasons
+      'ORDER_RESERVATION', 'ORDER_CANCELLED', 'ORDER_DELIVERED',
+      // General Reasons
+      'INITIAL_SETUP', 'CORRECTION', 'PHYSICAL_COUNT', 'SYSTEM_ADJUSTMENT'
+    ])
+    .withMessage('Valid reason is required')
 ];
 
 export const validateAddProduct = [

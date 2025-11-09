@@ -5,33 +5,38 @@ const inventoryLogSchema = new mongoose.Schema({
   retailer: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Admin',
-    required: true,
-    index: true
+    required: true
   },
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
-    required: true,
-    index: true
+    required: true
   },
   inventoryItem: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'RetailerInventory',
-    index: true
+    required: true
   },
-  
-  // Transaction Details
   transactionType: {
     type: String,
-    enum: ['STOCK_IN', 'STOCK_OUT', 'STOCK_ADJUSTMENT', 'COMMITMENT', 'RELEASE_COMMITMENT'],
     required: true,
-    index: true
+    enum: [
+      'STOCK_IN',
+      'STOCK_OUT', 
+      'STOCK_ADJUSTMENT',
+      'STOCK_TRANSFER',
+      'STOCK_TAKE',
+      'COMMITMENT',
+      'RELEASE_COMMITMENT',
+      'DAMAGE',
+      'EXPIRY',
+      'RETURN'
+    ]
   },
-  
-  // Quantity Information
   quantity: {
     type: Number,
-    required: true
+    required: true,
+    min: 0
   },
   previousStock: {
     type: Number,
@@ -43,51 +48,93 @@ const inventoryLogSchema = new mongoose.Schema({
   },
   unitCost: {
     type: Number,
-    min: 0
+    default: 0
   },
   totalValue: {
     type: Number,
-    min: 0
+    default: 0
   },
-  
-  // Reference Tracking
   referenceType: {
     type: String,
-    enum: ['ORDER', 'PURCHASE_ORDER', 'ADJUSTMENT', 'RETURN']
+    enum: [
+      'ORDER',
+      'PURCHASE_ORDER',
+      'STOCK_ADJUSTMENT',
+      'STOCK_TRANSFER',
+      'MANUAL',
+      'SYSTEM'
+    ]
   },
   referenceId: {
-    type: mongoose.Schema.Types.ObjectId,
-    index: true
+    type: String
   },
-  
-  // Batch Information
-  batchNumber: String,
-  expiryDate: Date,
-  
-  // Reason & Notes
+  batchNumber: {
+    type: String
+  },
+  expiryDate: {
+    type: Date
+  },
   reason: {
     type: String,
-    enum: ['SALE', 'PURCHASE', 'DAMAGED', 'EXPIRED', 'ADJUSTMENT', 'RETURN', 'INITIAL'],
-    required: true
+    required: true,
+    enum: [
+      // Stock In Reasons
+      'PURCHASE',
+      'RETURN',
+      'TRANSFER_IN',
+      'PRODUCTION',
+      'ADJUSTMENT_IN',
+      
+      // Stock Out Reasons  
+      'SALE',
+      'DAMAGE',
+      'EXPIRY',
+      'TRANSFER_OUT',
+      'SAMPLE',
+      'ADJUSTMENT_OUT',
+      
+      // Commitment Reasons
+      'ORDER_RESERVATION',
+      'ORDER_CANCELLED',
+      'ORDER_DELIVERED',
+      
+      // General Reasons
+      'INITIAL_SETUP',
+      'CORRECTION',
+      'PHYSICAL_COUNT',
+      'SYSTEM_ADJUSTMENT'
+    ]
   },
-  notes: String,
-  
-  // Audit Trail
+  notes: {
+    type: String
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true,
-    index: true
+    required: true
   },
-  ipAddress: String,
-  userAgent: String
+  ipAddress: {
+    type: String
+  },
+  userAgent: {
+    type: String
+  }
 }, {
   timestamps: true
 });
 
-// Indexes for reporting
+// Indexes for better query performance
 inventoryLogSchema.index({ retailer: 1, createdAt: -1 });
 inventoryLogSchema.index({ product: 1, createdAt: -1 });
-inventoryLogSchema.index({ transactionType: 1, createdAt: -1 });
+inventoryLogSchema.index({ referenceId: 1, referenceType: 1 });
+inventoryLogSchema.index({ transactionType: 1 });
+inventoryLogSchema.index({ reason: 1 });
 
-export default mongoose.model('InventoryLog', inventoryLogSchema);
+// Virtual for transaction value
+inventoryLogSchema.virtual('transactionValue').get(function() {
+  return this.unitCost * this.quantity;
+});
+
+const InventoryLog = mongoose.model('InventoryLog', inventoryLogSchema);
+
+export default InventoryLog;

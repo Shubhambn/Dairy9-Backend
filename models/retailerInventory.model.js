@@ -5,17 +5,17 @@ const retailerInventorySchema = new mongoose.Schema({
   retailer: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Admin',
-    required: true,
-    index: true
+    required: true
   },
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
-    required: true,
-    index: true
+    required: true
   },
-  
-  // Stock Information
+  productName: {
+    type: String,
+    required: true
+  },
   currentStock: {
     type: Number,
     default: 0,
@@ -26,100 +26,97 @@ const retailerInventorySchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
-  
-  // Pricing
+//   reservedStock: {
+//     type: Number,
+//     default: 0,
+//     min: 0
+//   },
+  sellingPrice: {
+    type: Number,
+    min: 0
+  },
   costPrice: {
     type: Number,
     min: 0
   },
-  sellingPrice: {
-    type: Number,
-    required: true,
-    min: 0
-  },
-  margin: {
-    type: Number,
-    min: 0
-  },
-  
-  // Stock Management
   minStockLevel: {
     type: Number,
     default: 10
   },
   maxStockLevel: {
     type: Number,
-    default: 200
+    default: 100
   },
   reorderQuantity: {
     type: Number,
     default: 50
   },
-  
-  // Status Flags
-  isActive: {
-    type: Boolean,
-    default: true,
-    index: true
-  },
-  lowStockAlert: {
-    type: Boolean,
-    default: false,
-    index: true
-  },
-  outOfStock: {
-    type: Boolean,
-    default: false,
-    index: true
-  },
-  
-  // Performance Metrics
   totalSold: {
     type: Number,
     default: 0
   },
-  totalRevenue: {
-    type: Number,
-    default: 0
+  lastSoldDate: {
+    type: Date
   },
-  lastRestocked: Date,
-  
-  // Batch Tracking
-  batches: [{
-    batchNumber: String,
-    quantity: Number,
-    expiryDate: Date,
-    manufacturingDate: Date,
-    costPrice: Number,
-    _id: false
-  }]
+  lastRestocked: {
+    type: Date
+  },
+  lastUpdated: {
+    type: Date,
+    default: Date.now
+  },
+  updatedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true // Keep required but we'll handle it properly
+  },
+  stockUpdateReason: {
+    type: String,
+    default: 'Initial stock'
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  lowStockAlert: {
+    type: Boolean,
+    default: false
+  }
 }, {
   timestamps: true
 });
 
+// Compound index
+retailerInventorySchema.index({ retailer: 1, product: 1 }, { unique: true });
+
+// Indexes for performance
+retailerInventorySchema.index({ retailer: 1, currentStock: 1 });
+retailerInventorySchema.index({ retailer: 1, committedStock: 1 });
+retailerInventorySchema.index({ lowStockAlert: 1 });
+
 // Virtual for available stock
 retailerInventorySchema.virtual('availableStock').get(function() {
-  return this.currentStock - this.committedStock;
+  return Math.max(0, this.currentStock - this.committedStock);
 });
 
-// Update flags before saving
-retailerInventorySchema.pre('save', function(next) {
+// Check if stock is low
+retailerInventorySchema.methods.checkLowStock = function() {
   this.lowStockAlert = this.currentStock <= this.minStockLevel;
-  this.outOfStock = this.currentStock === 0;
+  return this.lowStockAlert;
+};
+
+// Pre-save middleware to update low stock alert
+retailerInventorySchema.pre('save', function(next) {
+  this.checkLowStock();
   
-  // Calculate margin if cost price exists
-  if (this.costPrice && this.sellingPrice) {
-    this.margin = ((this.sellingPrice - this.costPrice) / this.costPrice) * 100;
+  // Auto-populate productName from product reference if not set
+  if (!this.productName && this.product && this.product.name) {
+    this.productName = this.product.name;
   }
   
   next();
 });
 
-// Compound indexes for performance
-retailerInventorySchema.index({ retailer: 1, product: 1 }, { unique: true });
-retailerInventorySchema.index({ retailer: 1, lowStockAlert: 1 });
-retailerInventorySchema.index({ retailer: 1, outOfStock: 1 });
-retailerInventorySchema.index({ retailer: 1, isActive: 1 });
-retailerInventorySchema.index({ updatedAt: -1 });
+const RetailerInventory = mongoose.model('RetailerInventory', retailerInventorySchema);
 
-export default mongoose.model('RetailerInventory', retailerInventorySchema);
+export default RetailerInventory;
