@@ -144,7 +144,7 @@ export const createOrder = async (req, res) => {
         customerLocation.latitude,
         customerLocation.longitude,
         retailers,
-        50 // 50km max radius
+        100 // 100km max radius
       );
       
       if (closestRetailerInfo && closestRetailerInfo.retailer) {
@@ -455,6 +455,9 @@ export const updateOrderStatus = async (req, res) => {
 // @desc    Get retailer's assigned orders
 // @route   GET /api/orders/retailer/my-orders
 // @access  Private/Retailer
+// @desc    Get retailer's assigned orders (ALL orders - no radius filtering)
+// @route   GET /api/orders/retailer/my-orders
+// @access  Private/Retailer
 export const getRetailerOrders = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -480,56 +483,29 @@ export const getRetailerOrders = async (req, res) => {
 
     console.log('Query filter:', filter);
 
-    // Get all orders assigned to this retailer
-    const allOrders = await Order.find(filter)
+    // Get all orders assigned to this retailer with pagination
+    const orders = await Order.find(filter)
       .populate('items.product', 'name image unit milkType')
       .populate('customer', 'personalInfo.fullName deliveryAddress')
       .sort({ createdAt: -1 })
-      .lean();
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
 
-    console.log(`Found ${allOrders.length} total assigned orders for retailer`);
+    console.log(`Found ${orders.length} orders for retailer`);
 
-    // Filter orders by retailer's service radius if location is available
-    let ordersWithinRadius = allOrders;
-    if (retailer.location?.coordinates && retailer.serviceRadius) {
-      ordersWithinRadius = allOrders.filter(order => {
-        if (!order.customer?.deliveryAddress?.coordinates) {
-          // If customer address coordinates are missing, exclude the order
-          return false;
-        }
-
-        const retailerLat = retailer.location.coordinates.latitude;
-        const retailerLon = retailer.location.coordinates.longitude;
-        const customerLat = order.customer.deliveryAddress.coordinates.latitude;
-        const customerLon = order.customer.deliveryAddress.coordinates.longitude;
-
-        const distance = calculateDistance(retailerLat, retailerLon, customerLat, customerLon);
-        return distance <= retailer.serviceRadius;
-      });
-
-      console.log(`Found ${ordersWithinRadius.length} orders within ${retailer.serviceRadius}km radius`);
-    }
-
-    // Apply pagination after filtering
-    const paginatedOrders = ordersWithinRadius.slice(
-      (page - 1) * limit,
-      page * limit
-    );
+    const total = await Order.countDocuments(filter);
 
     res.status(200).json({
       success: true,
-      orders: paginatedOrders,
+      orders,
       pagination: {
         currentPage: parseInt(page),
-        totalPages: Math.ceil(ordersWithinRadius.length / limit),
-        totalOrders: ordersWithinRadius.length,
-        totalAssigned: allOrders.length,
-        withinRadius: ordersWithinRadius.length
+        totalPages: Math.ceil(total / limit),
+        totalOrders: total
       },
       retailer: {
         shopName: retailer.shopName,
-        serviceRadius: retailer.serviceRadius,
-        hasLocation: !!retailer.location?.coordinates
+        serviceRadius: retailer.serviceRadius
       }
     });
   } catch (error) {
@@ -610,6 +586,140 @@ export const getRetailerOrderStats = async (req, res) => {
     });
   }
 };
+
+
+
+// @desc    Get retailer's active orders (non-delivered, non-cancelled)
+// @route   GET /api/orders/retailer/active-orders
+// @access  Private/Retailer
+export const getRetailerActiveOrders = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { page = 1, limit = 10, status } = req.query;
+
+    console.log('Retailer active orders request:', { retailerId: userId, status, page, limit });
+
+    // Verify retailer exists and is active
+    const retailer = await Admin.findOne({ user: userId, isActive: true });
+    if (!retailer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Retailer profile not found or inactive'
+      });
+    }
+
+    // For active orders, only show non-delivered and non-cancelled orders
+    const filter = { 
+      assignedRetailer: retailer._id,
+      orderStatus: { $nin: ['delivered', 'cancelled'] }
+    };
+    
+    // Additional status filter if provided
+    if (status && status !== 'all') {
+      filter.orderStatus = status;
+    }
+
+    console.log('Active orders filter:', filter);
+
+    // Get active orders assigned to this retailer with pagination
+    const orders = await Order.find(filter)
+      .populate('items.product', 'name image unit milkType')
+      .populate('customer', 'personalInfo.fullName deliveryAddress')
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    console.log(`Found ${orders.length} active orders for retailer`);
+
+    const total = await Order.countDocuments(filter);
+
+    res.status(200).json({
+      success: true,
+      orders,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        totalOrders: total
+      },
+      retailer: {
+        shopName: retailer.shopName,
+        serviceRadius: retailer.serviceRadius
+      }
+    });
+  } catch (error) {
+    console.error('Get Retailer Active Orders Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get retailer's order history (ALL orders - no status filtering)
+// @route   GET /api/orders/retailer/order-history
+// @access  Private/Retailer
+export const getRetailerOrderHistory = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { page = 1, limit = 10, status } = req.query;
+
+    console.log('Retailer order history request:', { retailerId: userId, status, page, limit });
+
+    // Verify retailer exists
+    const retailer = await Admin.findOne({ user: userId });
+    if (!retailer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Retailer profile not found'
+      });
+    }
+
+    // For order history, show ALL assigned orders regardless of status
+    const filter = { assignedRetailer: retailer._id };
+    
+    // Additional status filter if provided
+    if (status && status !== 'all') {
+      filter.orderStatus = status;
+    }
+
+    console.log('Order history filter:', filter);
+
+    // Get all orders assigned to this retailer with pagination
+    const orders = await Order.find(filter)
+      .populate('items.product', 'name image unit milkType')
+      .populate('customer', 'personalInfo.fullName deliveryAddress')
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    console.log(`Found ${orders.length} orders in history for retailer`);
+
+    const total = await Order.countDocuments(filter);
+
+    res.status(200).json({
+      success: true,
+      orders,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        totalOrders: total
+      },
+      retailer: {
+        shopName: retailer.shopName,
+        serviceRadius: retailer.serviceRadius
+      }
+    });
+  } catch (error) {
+    console.error('Get Retailer Order History Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
 
 // @desc    Update order status by retailer
 // @route   PUT /api/orders/retailer/:id/status
