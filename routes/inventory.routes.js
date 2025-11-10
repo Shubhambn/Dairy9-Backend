@@ -1,4 +1,4 @@
-// routes/inventory.routes.js
+// J:\dairy9 backend\Dairy9-Backend\routes\inventory.routes.js
 import express from 'express';
 import auth from '../middlewares/auth.js';
 import {

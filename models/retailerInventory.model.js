@@ -1,4 +1,4 @@
-// models/retailerInventory.model.js
+// J:\dairy9 backend\Dairy9-Backend\models\retailerInventory.model.js
 import mongoose from 'mongoose';
 
 const retailerInventorySchema = new mongoose.Schema({
