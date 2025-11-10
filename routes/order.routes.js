@@ -1,3 +1,5 @@
+// C:\Users\tejas\Downloads\Project-Dairy-9\Dairy9-Backend\routes\order.routes.js
+
 import express from 'express';
 import {
   createOrder,
@@ -6,7 +8,8 @@ import {
   cancelOrder,
   updateOrderStatus,
   getRetailerActiveOrders,
-  getRetailerOrderHistory
+  getRetailerOrderHistory,
+  createOfflineOrder
 } from '../controllers/order.controller.js';
 import { generateInvoice } from '../controllers/invoice.controller.js';
 import auth from '../middlewares/auth.js';
@@ -23,8 +26,11 @@ router.get('/', getCustomerOrders);
 router.get('/:id', getOrderById);
 router.get('/:id/invoice', generateInvoice);
 router.put('/:id/cancel', cancelOrder);
+
+// Retailer routes
+router.post('/offline', createOfflineOrder);
 router.get('/retailer/active-orders', getRetailerActiveOrders);
-router.get('/retailer/order-history',  getRetailerOrderHistory);
+router.get('/retailer/order-history', getRetailerOrderHistory);
 
 // Admin routes for order status update
 router.put('/:id/status', (req, res, next) => {
