@@ -84,6 +84,9 @@ const productSchema = new mongoose.Schema({
   qrCodeId: { 
     type: String 
   },
+  barcodeId:{
+    type:String
+  },
   retailerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Retailer",

@@ -10,7 +10,13 @@ import {
   getFeaturedProducts,
   searchProducts,
   uploadProductImages,
-  deleteProductImage
+  deleteProductImage,
+  // Add the new barcode functions
+  scanAndAssignBarcode,
+  updateProductBarcode,
+  removeProductBarcode,
+  getProductByBarcode,
+  scanBarcode
 } from '../controllers/product.controller.js';
 import auth from '../middlewares/auth.js';
 import upload from '../middlewares/upload.js';
@@ -40,6 +46,14 @@ router.post("/generate/:id", generateProductQR);
 
 // Scan and get product info
 router.post("/scan", scanProductQR);
+
+
+// Barcode Routes
+router.post('/:id/barcode', scanAndAssignBarcode);
+router.put('/:id/barcode', updateProductBarcode);
+router.delete('/:id/barcode', removeProductBarcode);
+router.get('/barcode/:barcodeId', getProductByBarcode);
+router.post('/scan-barcode', scanBarcode);
 
 // Add this to your routes for testing
 router.get('/test-cloudinary', async (req, res) => {
