@@ -648,3 +648,283 @@ export const scanProductQR = async (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 };
+
+// @desc    Scan and assign barcode to product
+// @route   POST /api/catalog/products/:id/barcode
+// @access  Private (Admin)
+export const scanAndAssignBarcode = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { barcodeId } = req.body;
+
+    // 1️⃣ Validate barcode ID
+    if (!barcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode ID is required'
+      });
+    }
+
+    // 2️⃣ Find product
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    // 3️⃣ Check if barcode is already assigned to another product
+    const existingProductWithBarcode = await Product.findOne({
+      barcodeId: barcodeId,
+      _id: { $ne: id } // Exclude current product
+    });
+
+    if (existingProductWithBarcode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode already assigned to another product',
+        existingProduct: {
+          id: existingProductWithBarcode._id,
+          name: existingProductWithBarcode.name
+        }
+      });
+    }
+
+    // 4️⃣ Check if product already has a barcode
+    if (product.barcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Product already has a barcode assigned',
+        currentBarcode: product.barcodeId
+      });
+    }
+
+    // 5️⃣ Assign barcode to product
+    product.barcodeId = barcodeId;
+    await product.save();
+
+    // 6️⃣ Populate and return updated product
+    const updatedProduct = await Product.findById(id)
+      .populate('category', 'name');
+
+    res.status(200).json({
+      success: true,
+      message: 'Barcode assigned successfully',
+      product: updatedProduct
+    });
+
+  } catch (error) {
+    console.error('Barcode Assignment Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during barcode assignment',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Update product barcode
+// @route   PUT /api/catalog/products/:id/barcode
+// @access  Private (Admin)
+export const updateProductBarcode = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { barcodeId } = req.body;
+
+    // 1️⃣ Validate barcode ID
+    if (!barcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode ID is required'
+      });
+    }
+
+    // 2️⃣ Find product
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    // 3️⃣ Check if new barcode is already assigned to another product
+    const existingProductWithBarcode = await Product.findOne({
+      barcodeId: barcodeId,
+      _id: { $ne: id }
+    });
+
+    if (existingProductWithBarcode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode already assigned to another product',
+        existingProduct: {
+          id: existingProductWithBarcode._id,
+          name: existingProductWithBarcode.name
+        }
+      });
+    }
+
+    // 4️⃣ Update barcode
+    const oldBarcode = product.barcodeId;
+    product.barcodeId = barcodeId;
+    await product.save();
+
+    const updatedProduct = await Product.findById(id)
+      .populate('category', 'name');
+
+    res.status(200).json({
+      success: true,
+      message: 'Barcode updated successfully',
+      oldBarcode,
+      newBarcode: barcodeId,
+      product: updatedProduct
+    });
+
+  } catch (error) {
+    console.error('Barcode Update Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during barcode update',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Remove barcode from product
+// @route   DELETE /api/catalog/products/:id/barcode
+// @access  Private (Admin)
+export const removeProductBarcode = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1️⃣ Find product
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    // 2️⃣ Check if product has a barcode
+    if (!product.barcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Product does not have a barcode assigned'
+      });
+    }
+
+    // 3️⃣ Remove barcode
+    const removedBarcode = product.barcodeId;
+    product.barcodeId = undefined;
+    await product.save();
+
+    const updatedProduct = await Product.findById(id)
+      .populate('category', 'name');
+
+    res.status(200).json({
+      success: true,
+      message: 'Barcode removed successfully',
+      removedBarcode,
+      product: updatedProduct
+    });
+
+  } catch (error) {
+    console.error('Barcode Removal Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during barcode removal',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get product by barcode ID
+// @route   GET /api/catalog/products/barcode/:barcodeId
+// @access  Public
+export const getProductByBarcode = async (req, res) => {
+  try {
+    const { barcodeId } = req.params;
+
+    const product = await Product.findOne({ 
+      barcodeId: barcodeId,
+      isAvailable: true 
+    }).populate('category', 'name');
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found for this barcode'
+      });
+    }
+
+    // Add discounted price
+    const productWithDiscount = {
+      ...product.toObject(),
+      discountedPrice: product.price - (product.price * (product.discount || 0) / 100)
+    };
+
+    res.status(200).json({
+      success: true,
+      product: productWithDiscount
+    });
+
+  } catch (error) {
+    console.error('Get Product by Barcode Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Scan barcode and get product info (for scanning apps)
+// @route   POST /api/catalog/products/scan-barcode
+// @access  Public
+export const scanBarcode = async (req, res) => {
+  try {
+    const { barcodeId } = req.body;
+
+    if (!barcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode ID is required'
+      });
+    }
+
+    const product = await Product.findOne({ 
+      barcodeId: barcodeId,
+      isAvailable: true 
+    }).populate('category', 'name');
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'No product found with this barcode'
+      });
+    }
+
+    // Add discounted price
+    const productWithDiscount = {
+      ...product.toObject(),
+      discountedPrice: product.price - (product.price * (product.discount || 0) / 100)
+    };
+
+    res.status(200).json({
+      success: true,
+      message: 'Barcode scan successful',
+      product: productWithDiscount
+    });
+
+  } catch (error) {
+    console.error('Barcode Scan Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: error.message
+    });
+  }
+};
