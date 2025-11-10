@@ -1,4 +1,4 @@
-// controllers/inventory.controller.js
+// J:\dairy9 backend\Dairy9-Backend\controllers\inventory.controller.js
 import asyncHandler from 'express-async-handler';
 import { body, validationResult } from 'express-validator';
 import InventoryService from '../services/inventory.service.js';
