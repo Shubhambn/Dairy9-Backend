@@ -15,9 +15,12 @@ import retailerOrderRoutes from './routes/retailer.order.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import locationRoutes from './routes/location.routes.js';
-
+import { initializeSuperAdmin } from './config/initializeSuperAdmin.js';
 // Import inventory routes (NEW)
 import inventoryRoutes from './routes/inventory.routes.js';
+import superadminRoutes from './routes/superadmin.routes.js';
+
+
 
 dotenv.config();
 const app = express();
@@ -34,6 +37,7 @@ connectDB();
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/superadmin', superadminRoutes);
 app.use('/api/customer', customerRoutes);
 app.use('/api/catalog', categoryRoutes);
 app.use('/api/catalog', productRoutes);

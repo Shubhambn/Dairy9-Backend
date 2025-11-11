@@ -2,6 +2,7 @@ import User from '../models/user.model.js';
 import Customer from '../models/customer.model.js';
 import Admin from '../models/admin.model.js';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 
 // Helper function to generate OTP
 const generateOTP = () => {
@@ -236,6 +237,7 @@ export async function sendOTP(req, res) {
 // @desc    Verify OTP and login user
 // @route   POST /api/auth/verify-otp
 // @access  Public
+
 export async function verifyOTP(req, res) {
   try {
     const { phone, otp } = req.body;
@@ -249,7 +251,8 @@ export async function verifyOTP(req, res) {
 
     const user = await User.findOne({ phone })
       .populate('customerProfile')
-      .populate('adminProfile');
+      .populate('adminProfile')
+      .select('+superadminPassword'); // include hashed secret for superadmin
 
     if (!user) {
       return res.status(404).json({ 
@@ -258,47 +261,42 @@ export async function verifyOTP(req, res) {
       });
     }
 
-    // Check if OTP exists and matches
+    // ✅ Validate OTP
     if (!user.otp || user.otp.code !== otp) {
-      return res.status(400).json({ 
-        success: false,
-        message: 'Invalid OTP' 
-      });
+      return res.status(400).json({ success: false, message: 'Invalid OTP' });
     }
 
-    // Check if OTP is expired
     if (user.otp.expiresAt < new Date()) {
       user.otp = undefined;
       await user.save();
-      return res.status(400).json({ 
-        success: false,
-        message: 'OTP has expired' 
-      });
+      return res.status(400).json({ success: false, message: 'OTP has expired' });
     }
 
-    // Verify user and clear OTP
+    // ✅ Clear OTP and mark verified
     user.isVerified = true;
     user.otp = undefined;
     await user.save();
 
-    // Generate JWT token
+    // 🧭 SuperAdmin path — don’t log in yet, move to next step
+    if (user.role === 'superadmin') {
+      return res.status(200).json({
+        success: true,
+        message: 'OTP verified successfully. Please enter secret key.',
+        requirePassword: true,
+        phone: user.phone
+      });
+    }
+
+    // 🧭 Other roles — log in immediately
     const token = jwt.sign(
-      { 
-        id: user._id, 
-        phone: user.phone, 
-        role: user.role 
-      },
-      process.env.JWT_SECRET || 'fallback-secret-key',
+      { id: user._id, phone: user.phone, role: user.role },
+      process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
 
-    // Prepare profile data
     let profile = null;
-    if (user.role === 'customer' && user.customerProfile) {
-      profile = user.customerProfile;
-    } else if ((user.role === 'admin' || user.role === 'retailer') && user.adminProfile) {
-      profile = user.adminProfile;
-    }
+    if (user.role === 'customer' && user.customerProfile) profile = user.customerProfile;
+    if ((user.role === 'admin' || user.role === 'retailer') && user.adminProfile) profile = user.adminProfile;
 
     res.status(200).json({
       success: true,
@@ -312,14 +310,15 @@ export async function verifyOTP(req, res) {
         profile 
       }
     });
+
   } catch (error) {
     console.error('Verify OTP Error:', error);
-    res.status(500).json({ 
-      success: false,
-      message: 'Server error during OTP verification'
-    });
+    res.status(500).json({ success: false, message: 'Server error during OTP verification' });
   }
 }
+
+
+
 
 // @desc    Resend OTP
 // @route   POST /api/auth/resend-otp

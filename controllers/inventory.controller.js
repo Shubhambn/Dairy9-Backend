@@ -3,43 +3,71 @@ import asyncHandler from 'express-async-handler';
 import { body, validationResult } from 'express-validator';
 import InventoryService from '../services/inventory.service.js';
 import Admin from '../models/admin.model.js';
-
+import Product from '../models/product.model.js';
+import RetailerInventory from '../models/retailerInventory.model.js';
+// import { getRetailerFromUser } from '../services/retailer.service.js'
 // Validation rules
-// CORRECT VALIDATION MIDDLEWARE - Update this
 export const validateStockUpdate = [
+  body('productId').isMongoId().withMessage('Valid product ID is required'),
+  body('quantity').isInt({ min: 1 }).withMessage('Quantity must be a positive integer'),
+  body('transactionType').isIn(['STOCK_IN', 'STOCK_OUT', 'STOCK_ADJUSTMENT', 'COMMITMENT', 'RELEASE_COMMITMENT'])
+    .withMessage('Valid transaction type is required'),
+  body('reason').isIn(['SALE', 'PURCHASE', 'DAMAGED', 'EXPIRED', 'ADJUSTMENT', 'RETURN', 'INITIAL'])
+    .withMessage('Valid reason is required'),
+  body('notes').optional().isString().isLength({ max: 500 }).withMessage('Notes must be less than 500 characters')
+];
+
+export const validateAddProduct = [
   body('productId')
     .isMongoId()
     .withMessage('Valid product ID is required'),
   
-  body('quantity')
+  body('currentStock')
+    .optional()
+    .isInt({ min: 0 })
+    .withMessage('Current stock must be a non-negative integer'),
+  
+  body('count')
+    .optional()
+    .isInt({ min: 0 })
+    .withMessage('Count must be a non-negative integer'),
+  
+  // ✅ FIXED: Added .optional() to make sellingPrice optional
+  body('sellingPrice')
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage('Selling price must be a non-negative number'),
+  
+  body('costPrice')
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage('Cost price must be non-negative'),
+  
+  body('minStockLevel')
+    .optional()
+    .isInt({ min: 0 })
+    .withMessage('Min stock level must be non-negative'),
+  
+  body('maxStockLevel')
+    .optional()
     .isInt({ min: 1 })
-    .withMessage('Quantity must be a positive integer'),
+    .withMessage('Max stock level must be positive'),
   
-  body('transactionType')
-    .isIn(['STOCK_IN', 'STOCK_OUT', 'STOCK_ADJUSTMENT', 'STOCK_TRANSFER', 'STOCK_TAKE', 'COMMITMENT', 'RELEASE_COMMITMENT', 'DAMAGE', 'EXPIRY', 'RETURN'])
-    .withMessage('Valid transaction type is required'),
+  body('committedStock')
+    .optional()
+    .isInt({ min: 0 })
+    .withMessage('Committed stock must be non-negative'),
   
-  body('reason')
-    .isIn([
-      // Stock In Reasons
-      'PURCHASE', 'RETURN', 'TRANSFER_IN', 'PRODUCTION', 'ADJUSTMENT_IN',
-      // Stock Out Reasons  
-      'SALE', 'DAMAGE', 'EXPIRY', 'TRANSFER_OUT', 'SAMPLE', 'ADJUSTMENT_OUT',
-      // Commitment Reasons
-      'ORDER_RESERVATION', 'ORDER_CANCELLED', 'ORDER_DELIVERED',
-      // General Reasons
-      'INITIAL_SETUP', 'CORRECTION', 'PHYSICAL_COUNT', 'SYSTEM_ADJUSTMENT'
-    ])
-    .withMessage('Valid reason is required')
-];
-
-export const validateAddProduct = [
-  body('productId').isMongoId().withMessage('Valid product ID is required'),
-  body('initialStock').optional().isInt({ min: 0 }).withMessage('Initial stock must be a non-negative integer'),
-  body('sellingPrice').isFloat({ min: 0 }).withMessage('Valid selling price is required'),
-  body('costPrice').optional().isFloat({ min: 0 }).withMessage('Cost price must be non-negative'),
-  body('minStockLevel').optional().isInt({ min: 0 }).withMessage('Min stock level must be non-negative'),
-  body('maxStockLevel').optional().isInt({ min: 1 }).withMessage('Max stock level must be positive')
+  body('stockUpdateReason')
+    .optional()
+    .isString()
+    .isLength({ max: 500 })
+    .withMessage('Stock update reason must be less than 500 characters'),
+  
+  body('isActive')
+    .optional()
+    .isBoolean()
+    .withMessage('isActive must be a boolean value')
 ];
 
 // Helper to get retailer from user
@@ -97,24 +125,119 @@ export const addProductToInventory = [
       }
 
       const retailer = await getRetailerFromUser(req.user._id);
-      const inventoryItem = await InventoryService.addProductToInventory(
-        retailer._id,
-        req.body,
-        req.user._id
-      );
+      
+      // Get the original product to access default price and details
+      const originalProduct = await Product.findById(req.body.productId);
+      if (!originalProduct) {
+        return res.status(404).json({
+          success: false,
+          message: 'Product not found'
+        });
+      }
+
+      // Check if product already exists in retailer's inventory
+      const existingInventory = await RetailerInventory.findOne({
+        retailer: retailer._id,
+        product: req.body.productId
+      });
+
+      if (existingInventory) {
+        return res.status(400).json({
+          success: false,
+          message: 'Product already exists in inventory'
+        });
+      }
+
+      // Calculate default selling price (using product's discounted price)
+      const defaultSellingPrice = originalProduct.discount > 0 
+        ? originalProduct.price * (1 - originalProduct.discount / 100)
+        : originalProduct.price;
+
+      // Prepare inventory data using your existing schema fields
+      const inventoryData = {
+        retailer: retailer._id,
+        product: req.body.productId,
+        productName: originalProduct.name, // Populate from product
+        currentStock: req.body.currentStock || req.body.count || 0, // Use count/currentStock
+        committedStock: req.body.committedStock || 0,
+        sellingPrice: req.body.sellingPrice || defaultSellingPrice, // Use calculated discounted price if not overridden
+        costPrice: req.body.costPrice || originalProduct.price, // Use original price as cost price
+        minStockLevel: req.body.minStockLevel || 10,
+        maxStockLevel: req.body.maxStockLevel || 100,
+        reorderQuantity: req.body.reorderQuantity || 50,
+        updatedBy: req.user._id,
+        stockUpdateReason: req.body.stockUpdateReason || 'Initial stock addition',
+        isActive: req.body.isActive !== undefined ? req.body.isActive : true,
+        lastRestocked: new Date(),
+        lastUpdated: new Date()
+      };
+
+      // Create new inventory item
+      const inventoryItem = new RetailerInventory(inventoryData);
+      await inventoryItem.save();
+
+      // Populate the product details in response
+      await inventoryItem.populate('product', 'name description price discount unit unitSize image');
+      await inventoryItem.populate('retailer', 'businessName');
 
       res.status(201).json({
         success: true,
         message: 'Product added to inventory successfully',
-        data: inventoryItem
+        data: {
+          _id: inventoryItem._id,
+          retailer: inventoryItem.retailer,
+          product: inventoryItem.product,
+          productName: inventoryItem.productName,
+          currentStock: inventoryItem.currentStock,
+          committedStock: inventoryItem.committedStock,
+          availableStock: inventoryItem.availableStock, // Virtual field
+          sellingPrice: inventoryItem.sellingPrice,
+          costPrice: inventoryItem.costPrice,
+          minStockLevel: inventoryItem.minStockLevel,
+          maxStockLevel: inventoryItem.maxStockLevel,
+          reorderQuantity: inventoryItem.reorderQuantity,
+          lowStockAlert: inventoryItem.lowStockAlert,
+          isActive: inventoryItem.isActive,
+          stockUpdateReason: inventoryItem.stockUpdateReason,
+          lastRestocked: inventoryItem.lastRestocked,
+          lastUpdated: inventoryItem.lastUpdated,
+          createdAt: inventoryItem.createdAt,
+          updatedAt: inventoryItem.updatedAt
+        }
       });
 
     } catch (error) {
-      console.error('Add product error:', error);
-      const statusCode = error.message.includes('already exists') ? 400 : 500;
-      res.status(statusCode).json({
+      console.error('Add product to inventory error:', error);
+      
+      // Handle duplicate key error (unique constraint violation)
+      if (error.code === 11000) {
+        return res.status(400).json({
+          success: false,
+          message: 'Product already exists in inventory'
+        });
+      }
+      
+      // Handle validation errors
+      if (error.name === 'ValidationError') {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation error',
+          errors: Object.values(error.errors).map(err => err.message)
+        });
+      }
+      
+      // Handle CastError (invalid ObjectId)
+      if (error.name === 'CastError') {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid product ID'
+        });
+      }
+      
+      res.status(500).json({
         success: false,
-        message: error.message
+        message: 'Server error while adding product to inventory',
+        error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
       });
     }
   })
