@@ -8,15 +8,13 @@ import {
   uploadMultipleToCloudinary, 
   deleteFromCloudinary 
 } from '../utils/cloudinaryUpload.js';
-import { generateQRCode } from '../utils/QrGen.utils.js';
-import { addTextToQR } from '../utils/Qrinfo.utils.js'; // 👈 new util
+import { generateBarcode, addTextToBarcode } from '../utils/barcodeGen.utils.js';
 import streamifier from 'streamifier';
 import { testCloudinaryConnection } from '../utils/cloudinaryUpload.js';
 
-
-
-// @desc    Create new product (with QR + text overlay)
-// controllers/product.controller.js
+// @desc    Create new product (with optional barcode generation)
+// @route   POST /api/catalog/products
+// @access  Private (Admin)
 export const createProduct = async (req, res) => {
   // 0️⃣ Test Cloudinary connection
   const cloudinaryConnected = await testCloudinaryConnection();
@@ -30,7 +28,8 @@ export const createProduct = async (req, res) => {
   try {
     const { 
       name, description, price, category, unit, unitSize, stock, 
-      milkType, nutritionalInfo, tags, discount, isFeatured 
+      milkType, nutritionalInfo, tags, discount, isFeatured,
+      generateBarcode: shouldGenerateBarcode = false
     } = req.body;
 
     // 1️⃣ Validate required fields
@@ -74,7 +73,7 @@ export const createProduct = async (req, res) => {
       }
     }
 
-    // 5️⃣ Create product first to get _id
+    // 5️⃣ Create product
     const product = new Product({
       name,
       description,
@@ -90,44 +89,34 @@ export const createProduct = async (req, res) => {
       nutritionalInfo: nutritionalInfo || {},
       tags: tags || [],
       discount: discount || 0,
-      isFeatured: isFeatured || false
+      isFeatured: isFeatured || false,
+      // Initialize barcode fields
+      barcodeId: null,
+      barcodeUrl: null,
+      scannedBarcodeId: null
     });
 
     await product.save();
     await product.populate('category', 'name');
 
-    // 6️⃣ Generate QR code
-    try {
-      const qrPayload = {
-        productId: product._id.toString(),
-        name: product.name,
-        category: categoryExists.name,
-        price: product.price
-      };
-
-      const qrBuffer = await generateQRCode(qrPayload);
-      const qrWithTextBuffer = await addTextToQR(qrBuffer, product.name);
-      const qrUpload = await uploadToCloudinary(qrWithTextBuffer, 'dairy9/products/qr');
-
-      // Save QR info to product
-      product.qrCodeUrl = qrUpload.secure_url;
-      product.qrCodeId = qrUpload.public_id;
-      await product.save();
-
-    } catch (qrError) {
-      console.error('QR code generation/upload failed:', qrError.message);
-      // Continue without QR
+    // 6️⃣ Generate barcode only if requested
+    if (shouldGenerateBarcode === 'true') {
+      try {
+        await generateAndAssignBarcode(product);
+      } catch (barcodeError) {
+        console.error('Barcode generation failed:', barcodeError.message);
+        // Continue without barcode
+      }
     }
 
-    // 7️⃣ Fetch final updated product for response
+    // 7️⃣ Fetch final product
     const finalProduct = await Product.findById(product._id).populate('category', 'name');
 
-    // 8️⃣ Return success
     res.status(201).json({
       success: true,
-      message: finalProduct.qrCodeUrl 
-        ? '✅ Product created successfully with QR' 
-        : '✅ Product created successfully (QR generation skipped)',
+      message: finalProduct.barcodeUrl
+        ? '✅ Product created successfully with barcode'
+        : '✅ Product created successfully',
       product: finalProduct
     });
 
@@ -141,6 +130,21 @@ export const createProduct = async (req, res) => {
   }
 };
 
+// Helper function to generate and assign barcode
+const generateAndAssignBarcode = async (product) => {
+  const barcodeText = product._id.toString();
+  
+  const barcodeBuffer = await generateBarcode(barcodeText, product.name, product.unitSize, product.unit);
+  const barcodeWithTextBuffer = await addTextToBarcode(barcodeBuffer, product.name);
+  const barcodeUpload = await uploadToCloudinary(barcodeWithTextBuffer, 'dairy9/products/barcode');
+
+  // Save barcode info
+  product.barcodeUrl = barcodeUpload.secure_url;
+  product.barcodeId = barcodeText;
+  await product.save();
+
+  return barcodeUpload.secure_url;
+};
 
 // @desc    Get all products with filters
 // @route   GET /api/catalog/products
@@ -204,12 +208,28 @@ export const getAllProducts = async (req, res) => {
       .sort(sortOptions)
       .skip(skip)
       .limit(limitNum)
-      .lean(); // For better performance
+      .lean();
 
-    // Add discounted price to each product
-    const productsWithDiscount = products.map(product => ({
+    // Add enhanced barcode info to each product
+    const productsWithBarcodeInfo = products.map(product => ({
       ...product,
-      discountedPrice: product.price - (product.price * (product.discount || 0) / 100)
+      discountedPrice: product.price - (product.price * (product.discount || 0) / 100),
+      // Enhanced barcode information
+      hasGeneratedBarcode: !!product.barcodeId,
+      hasScannedBarcode: !!product.scannedBarcodeId,
+      activeBarcodeId: product.scannedBarcodeId || product.barcodeId,
+      barcodeType: product.scannedBarcodeId ? 'scanned' : (product.barcodeId ? 'generated' : 'none'),
+      barcodeInfo: {
+        generated: product.barcodeId ? {
+          id: product.barcodeId,
+          url: product.barcodeUrl,
+          exists: true
+        } : { exists: false },
+        scanned: product.scannedBarcodeId ? {
+          id: product.scannedBarcodeId,
+          exists: true
+        } : { exists: false }
+      }
     }));
 
     // Get total count for pagination
@@ -218,7 +238,7 @@ export const getAllProducts = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      products: productsWithDiscount,
+      products: productsWithBarcodeInfo,
       pagination: {
         currentPage: pageNum,
         totalPages,
@@ -252,15 +272,30 @@ export const getProductById = async (req, res) => {
       });
     }
 
-    // Add discounted price
-    const productWithDiscount = {
+    // Add enhanced barcode info
+    const productWithBarcodeInfo = {
       ...product.toObject(),
-      discountedPrice: product.price - (product.price * (product.discount || 0) / 100)
+      discountedPrice: product.price - (product.price * (product.discount || 0) / 100),
+      hasGeneratedBarcode: !!product.barcodeId,
+      hasScannedBarcode: !!product.scannedBarcodeId,
+      activeBarcodeId: product.scannedBarcodeId || product.barcodeId,
+      barcodeType: product.scannedBarcodeId ? 'scanned' : (product.barcodeId ? 'generated' : 'none'),
+      barcodeInfo: {
+        generated: product.barcodeId ? {
+          id: product.barcodeId,
+          url: product.barcodeUrl,
+          exists: true
+        } : { exists: false },
+        scanned: product.scannedBarcodeId ? {
+          id: product.scannedBarcodeId,
+          exists: true
+        } : { exists: false }
+      }
     };
 
     res.status(200).json({
       success: true,
-      product: productWithDiscount
+      product: productWithBarcodeInfo
     });
   } catch (error) {
     console.error('Get Product Error:', error);
@@ -367,6 +402,17 @@ export const deleteProduct = async (req, res) => {
           }
         }
       }
+
+      // Delete generated barcode image if exists
+      if (product.barcodeUrl) {
+        try {
+          const publicId = product.barcodeUrl.split('/').pop().split('.')[0];
+          const fullPublicId = `dairy9/products/barcode/${publicId}`;
+          await deleteFromCloudinary(fullPublicId);
+        } catch (barcodeDeleteError) {
+          console.error('Error deleting barcode image:', barcodeDeleteError);
+        }
+      }
     } catch (deleteError) {
       console.error('Error deleting images from Cloudinary:', deleteError);
     }
@@ -402,14 +448,17 @@ export const getFeaturedProducts = async (req, res) => {
       .limit(8)
       .sort({ createdAt: -1 });
 
-    const productsWithDiscount = products.map(product => ({
+    const productsWithBarcodeInfo = products.map(product => ({
       ...product.toObject(),
-      discountedPrice: product.price - (product.price * (product.discount || 0) / 100)
+      discountedPrice: product.price - (product.price * (product.discount || 0) / 100),
+      hasGeneratedBarcode: !!product.barcodeId,
+      hasScannedBarcode: !!product.scannedBarcodeId,
+      activeBarcodeId: product.scannedBarcodeId || product.barcodeId
     }));
 
     res.status(200).json({
       success: true,
-      products: productsWithDiscount
+      products: productsWithBarcodeInfo
     });
   } catch (error) {
     console.error('Get Featured Products Error:', error);
@@ -451,14 +500,17 @@ export const searchProducts = async (req, res) => {
       .limit(20)
       .sort({ score: { $meta: 'textScore' }, createdAt: -1 });
 
-    const productsWithDiscount = products.map(product => ({
+    const productsWithBarcodeInfo = products.map(product => ({
       ...product.toObject(),
-      discountedPrice: product.price - (product.price * (product.discount || 0) / 100)
+      discountedPrice: product.price - (product.price * (product.discount || 0) / 100),
+      hasGeneratedBarcode: !!product.barcodeId,
+      hasScannedBarcode: !!product.scannedBarcodeId,
+      activeBarcodeId: product.scannedBarcodeId || product.barcodeId
     }));
 
     res.status(200).json({
       success: true,
-      products: productsWithDiscount,
+      products: productsWithBarcodeInfo,
       searchQuery: query,
       totalResults: products.length
     });
@@ -572,79 +624,745 @@ export const deleteProductImage = async (req, res) => {
   }
 };
 
-// 🎯 Generate a QR for an existing product
-export const generateProductQR = async (req, res) => {
+// ──────────────────────────────────────────────────────────────
+// ENHANCED BARCODE MANAGEMENT FUNCTIONS
+// ──────────────────────────────────────────────────────────────
+
+// @desc    Scan and assign barcode to product (SCANNED BARCODE)
+// @route   POST /api/catalog/products/:id/scan-barcode
+// @access  Private (Admin)
+export const scanAndAssignBarcode = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { scannedBarcodeId } = req.body;
+
+    console.log('=== SCANNED BARCODE ASSIGNMENT START ===');
+    console.log('📦 Product ID:', id);
+    console.log('📦 Scanned Barcode ID:', scannedBarcodeId);
+
+    // 1️⃣ Validate input
+    if (!scannedBarcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Scanned barcode ID is required'
+      });
+    }
+
+    // 2️⃣ Find product
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    // 3️⃣ Check if scanned barcode is already assigned to another product
+    const existingProductWithScannedBarcode = await Product.findOne({
+      scannedBarcodeId: scannedBarcodeId,
+      _id: { $ne: id }
+    });
+
+    if (existingProductWithScannedBarcode) {
+      return res.status(400).json({
+        success: false,
+        message: 'This scanned barcode is already assigned to another product',
+        existingProduct: {
+          id: existingProductWithScannedBarcode._id,
+          name: existingProductWithScannedBarcode.name
+        }
+      });
+    }
+
+    // 4️⃣ Check if this scanned barcode matches any generated barcode in system
+    const productWithGeneratedBarcode = await Product.findOne({
+      barcodeId: scannedBarcodeId,
+      _id: { $ne: id }
+    });
+
+    if (productWithGeneratedBarcode) {
+      return res.status(400).json({
+        success: false,
+        message: 'This barcode matches a generated barcode of another product',
+        conflictingProduct: {
+          id: productWithGeneratedBarcode._id,
+          name: productWithGeneratedBarcode.name
+        }
+      });
+    }
+
+    // 5️⃣ Assign scanned barcode (this takes priority over generated barcode)
+    const oldScannedBarcode = product.scannedBarcodeId;
+    product.scannedBarcodeId = scannedBarcodeId;
+    await product.save();
+
+    console.log('✅ Scanned barcode assigned successfully');
+
+    // 6️⃣ Return updated product with enhanced barcode info
+    const updatedProduct = await Product.findById(id)
+      .populate('category', 'name');
+
+    const productWithBarcodeInfo = {
+      ...updatedProduct.toObject(),
+      hasGeneratedBarcode: !!updatedProduct.barcodeId,
+      hasScannedBarcode: true,
+      activeBarcodeId: scannedBarcodeId,
+      barcodeType: 'scanned'
+    };
+
+    res.status(200).json({
+      success: true,
+      message: 'Scanned barcode assigned successfully',
+      barcodeType: 'scanned',
+      scannedBarcodeId: scannedBarcodeId,
+      previousScannedBarcode: oldScannedBarcode,
+      product: productWithBarcodeInfo
+    });
+
+  } catch (error) {
+    console.error('❌ Scanned Barcode Assignment Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during scanned barcode assignment',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Generate barcode for product (GENERATED BARCODE)
+// @route   POST /api/catalog/products/:id/generate-barcode
+// @access  Private (Admin)
+export const generateProductBarcode = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Product not found' 
+      });
+    }
+
+    // Check if barcode already exists
+    if (product.barcodeUrl && product.barcodeId) {
+      const productWithBarcodeInfo = {
+        ...product.toObject(),
+        hasGeneratedBarcode: true,
+        hasScannedBarcode: !!product.scannedBarcodeId,
+        activeBarcodeId: product.scannedBarcodeId || product.barcodeId,
+        barcodeType: product.scannedBarcodeId ? 'scanned' : 'generated'
+      };
+
+      return res.status(200).json({
+        success: true,
+        message: 'Generated barcode already exists',
+        barcodeType: 'generated',
+        barcodeUrl: product.barcodeUrl,
+        barcodeId: product.barcodeId,
+        product: productWithBarcodeInfo
+      });
+    }
+
+    console.log('🔄 Generating barcode for:', product.name);
+
+    // Generate barcode
+    const barcodeUrl = await generateAndAssignBarcode(product);
+
+    console.log('✅ Barcode generated successfully');
+
+    const updatedProduct = await Product.findById(id)
+      .populate('category', 'name');
+
+    const productWithBarcodeInfo = {
+      ...updatedProduct.toObject(),
+      hasGeneratedBarcode: true,
+      hasScannedBarcode: !!updatedProduct.scannedBarcodeId,
+      activeBarcodeId: updatedProduct.scannedBarcodeId || product.barcodeId,
+      barcodeType: updatedProduct.scannedBarcodeId ? 'scanned' : 'generated'
+    };
+
+    res.status(200).json({
+      success: true,
+      message: 'Barcode generated successfully',
+      barcodeType: 'generated',
+      barcodeUrl: barcodeUrl,
+      barcodeId: product.barcodeId,
+      product: productWithBarcodeInfo
+    });
+
+  } catch (error) {
+    console.error('❌ Barcode Generation Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to generate barcode', 
+      error: error.message 
+    });
+  }
+};
+
+// @desc    Remove scanned barcode from product
+// @route   DELETE /api/catalog/products/:id/scanned-barcode
+// @access  Private (Admin)
+export const removeScannedBarcode = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    // Check if product has a scanned barcode
+    if (!product.scannedBarcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Product does not have a scanned barcode assigned'
+      });
+    }
+
+    // Remove scanned barcode
+    const removedBarcode = product.scannedBarcodeId;
+    product.scannedBarcodeId = null;
+    await product.save();
+
+    const updatedProduct = await Product.findById(id)
+      .populate('category', 'name');
+
+    const productWithBarcodeInfo = {
+      ...updatedProduct.toObject(),
+      hasScannedBarcode: false,
+      hasGeneratedBarcode: !!updatedProduct.barcodeId,
+      activeBarcodeId: updatedProduct.barcodeId, // Fall back to generated barcode
+      barcodeType: updatedProduct.barcodeId ? 'generated' : 'none'
+    };
+
+    res.status(200).json({
+      success: true,
+      message: 'Scanned barcode removed successfully',
+      removedBarcode: removedBarcode,
+      product: productWithBarcodeInfo
+    });
+
+  } catch (error) {
+    console.error('Scanned Barcode Removal Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during scanned barcode removal',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Delete generated barcode from product
+// @route   DELETE /api/catalog/products/:id/generated-barcode
+// @access  Private (Admin)
+export const deleteGeneratedBarcode = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    // Check if product has a generated barcode
+    if (!product.barcodeId || !product.barcodeUrl) {
+      return res.status(400).json({
+        success: false,
+        message: 'Product does not have a generated barcode'
+      });
+    }
+
+    // Delete barcode image from Cloudinary
+    try {
+      const publicId = product.barcodeUrl.split('/').pop().split('.')[0];
+      const fullPublicId = `dairy9/products/barcode/${publicId}`;
+      await deleteFromCloudinary(fullPublicId);
+      console.log('✅ Barcode image deleted from Cloudinary');
+    } catch (deleteError) {
+      console.error('Error deleting barcode image from Cloudinary:', deleteError);
+      // Continue with deletion from database even if Cloudinary delete fails
+    }
+
+    // Remove barcode info
+    const removedBarcodeId = product.barcodeId;
+    const removedBarcodeUrl = product.barcodeUrl;
+    
+    product.barcodeId = null;
+    product.barcodeUrl = null;
+    await product.save();
+
+    const updatedProduct = await Product.findById(id)
+      .populate('category', 'name');
+
+    const productWithBarcodeInfo = {
+      ...updatedProduct.toObject(),
+      hasGeneratedBarcode: false,
+      hasScannedBarcode: !!updatedProduct.scannedBarcodeId,
+      activeBarcodeId: updatedProduct.scannedBarcodeId, // Fall back to scanned barcode if exists
+      barcodeType: updatedProduct.scannedBarcodeId ? 'scanned' : 'none'
+    };
+
+    res.status(200).json({
+      success: true,
+      message: 'Generated barcode deleted successfully',
+      removedBarcode: {
+        id: removedBarcodeId,
+        url: removedBarcodeUrl
+      },
+      product: productWithBarcodeInfo
+    });
+
+  } catch (error) {
+    console.error('Generated Barcode Deletion Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during generated barcode deletion',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get product by barcode (supports both scanned and generated)
+// @route   GET /api/catalog/products/barcode/:barcodeId
+// @access  Public
+export const getProductByBarcode = async (req, res) => {
+  try {
+    const { barcodeId } = req.params;
+
+    console.log('🔍 Searching for product with barcode:', barcodeId);
+
+    // Search in both scanned and generated barcodes (scanned takes priority)
+    const product = await Product.findOne({
+      $and: [
+        { isAvailable: true },
+        {
+          $or: [
+            { scannedBarcodeId: barcodeId }, // Scanned barcodes first
+            { barcodeId: barcodeId }         // Generated barcodes second
+          ]
+        }
+      ]
+    }).populate('category', 'name');
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'No product found with this barcode'
+      });
+    }
+
+    // Determine barcode type
+    const barcodeType = product.scannedBarcodeId === barcodeId ? 'scanned' : 'generated';
+
+    // Add enhanced barcode info
+    const productWithBarcodeInfo = {
+      ...product.toObject(),
+      discountedPrice: product.price - (product.price * (product.discount || 0) / 100),
+      hasGeneratedBarcode: !!product.barcodeId,
+      hasScannedBarcode: !!product.scannedBarcodeId,
+      activeBarcodeId: barcodeId,
+      barcodeType: barcodeType
+    };
+
+    console.log('✅ Product found:', product.name, 'Barcode type:', barcodeType);
+
+    res.status(200).json({
+      success: true,
+      product: productWithBarcodeInfo,
+      barcodeType: barcodeType,
+      message: `Product found (${barcodeType} barcode)`
+    });
+
+  } catch (error) {
+    console.error('Get Product by Barcode Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Scan barcode and get product info (for scanning apps)
+// @route   POST /api/catalog/products/scan
+// @access  Public
+export const scanBarcode = async (req, res) => {
+  try {
+    const { barcodeId } = req.body;
+
+    if (!barcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode ID is required'
+      });
+    }
+
+    console.log('📱 Mobile scan for barcode:', barcodeId);
+
+    // Search for product with this barcode
+    const product = await Product.findOne({
+      $and: [
+        { isAvailable: true },
+        {
+          $or: [
+            { scannedBarcodeId: barcodeId },
+            { barcodeId: barcodeId }
+          ]
+        }
+      ]
+    }).populate('category', 'name');
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'No product found with this barcode',
+        barcodeId: barcodeId
+      });
+    }
+
+    // Determine barcode type
+    const barcodeType = product.scannedBarcodeId === barcodeId ? 'scanned' : 'generated';
+
+    const productWithBarcodeInfo = {
+      ...product.toObject(),
+      discountedPrice: product.price - (product.price * (product.discount || 0) / 100),
+      hasGeneratedBarcode: !!product.barcodeId,
+      hasScannedBarcode: !!product.scannedBarcodeId,
+      activeBarcodeId: barcodeId,
+      barcodeType: barcodeType
+    };
+
+    res.status(200).json({
+      success: true,
+      message: `Barcode scan successful (${barcodeType} barcode)`,
+      product: productWithBarcodeInfo,
+      barcodeType: barcodeType,
+      barcodeId: barcodeId
+    });
+
+  } catch (error) {
+    console.error('Barcode Scan Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Get product barcode info
+// @route   GET /api/catalog/products/:id/barcode-info
+// @access  Public
+export const getProductBarcodeInfo = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const product = await Product.findById(id)
+      .select('barcodeId barcodeUrl scannedBarcodeId name category')
+      .populate('category', 'name');
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const barcodeInfo = {
+      generated: product.barcodeId ? {
+        id: product.barcodeId,
+        url: product.barcodeUrl,
+        exists: true
+      } : { exists: false },
+      scanned: product.scannedBarcodeId ? {
+        id: product.scannedBarcodeId,
+        exists: true
+      } : { exists: false },
+      activeBarcode: product.scannedBarcodeId || product.barcodeId,
+      priority: product.scannedBarcodeId ? 'scanned' : (product.barcodeId ? 'generated' : 'none'),
+      hasAnyBarcode: !!(product.scannedBarcodeId || product.barcodeId)
+    };
+
+    res.status(200).json({
+      success: true,
+      productName: product.name,
+      productId: product._id,
+      category: product.category,
+      barcodeInfo: barcodeInfo
+    });
+
+  } catch (error) {
+    console.error('Get Barcode Info Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Update product barcode (legacy - for backward compatibility)
+// @route   PUT /api/catalog/products/:id/barcode
+// @access  Private (Admin)
+export const updateProductBarcode = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { barcodeId } = req.body;
+
+    // 1️⃣ Validate barcode ID
+    if (!barcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode ID is required'
+      });
+    }
+
+    // 2️⃣ Find product
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    // 3️⃣ Check if new barcode is already assigned to another product
+    const existingProductWithBarcode = await Product.findOne({
+      $or: [
+        { scannedBarcodeId: barcodeId },
+        { barcodeId: barcodeId }
+      ],
+      _id: { $ne: id }
+    });
+
+    if (existingProductWithBarcode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode already assigned to another product',
+        existingProduct: {
+          id: existingProductWithBarcode._id,
+          name: existingProductWithBarcode.name
+        }
+      });
+    }
+
+    // 4️⃣ Update barcode (assign as scanned barcode for legacy support)
+    const oldBarcode = product.scannedBarcodeId || product.barcodeId;
+    product.scannedBarcodeId = barcodeId;
+    await product.save();
+
+    const updatedProduct = await Product.findById(id)
+      .populate('category', 'name');
+
+    const productWithBarcodeInfo = {
+      ...updatedProduct.toObject(),
+      hasGeneratedBarcode: !!updatedProduct.barcodeId,
+      hasScannedBarcode: true,
+      activeBarcodeId: barcodeId,
+      barcodeType: 'scanned'
+    };
+
+    res.status(200).json({
+      success: true,
+      message: 'Barcode updated successfully',
+      oldBarcode,
+      newBarcode: barcodeId,
+      product: productWithBarcodeInfo
+    });
+
+  } catch (error) {
+    console.error('Barcode Update Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during barcode update',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Remove barcode from product (legacy - for backward compatibility)
+// @route   DELETE /api/catalog/products/:id/barcode
+// @access  Private (Admin)
+export const removeProductBarcode = async (req, res) => {
   try {
     const { id } = req.params;
 
     // 1️⃣ Find product
     const product = await Product.findById(id);
     if (!product) {
-      return res.status(404).json({ success: false, message: 'Product not found' });
-    }
-
-    // 2️⃣ Check if QR already exists
-    if (product.qrCodeUrl && product.qrCodeId) {
-      return res.status(200).json({
-        success: true,
-        message: 'QR code already exists',
-        qrCodeUrl: product.qrCodeUrl
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
       });
     }
 
-    // 3️⃣ Generate QR payload
-    const qrPayload = {
-      productId: product._id.toString(),
-      name: product.name,
-      price: product.price,
-      category: product.category
-    };
+    // 2️⃣ Check if product has any barcode
+    if (!product.scannedBarcodeId && !product.barcodeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Product does not have any barcode assigned'
+      });
+    }
 
-    // 4️⃣ Generate QR buffer
-    const qrBuffer = await generateQRCode(qrPayload);
-
-    // 5️⃣ Add text below QR
-    const qrWithTextBuffer = await addTextToQR(qrBuffer, product.name);
-
-    // 6️⃣ Upload QR to Cloudinary
-    const qrUpload = await uploadToCloudinary(qrWithTextBuffer, 'dairy9/products/qr');
-
-    // 7️⃣ Save QR info in product
-    product.qrCodeUrl = qrUpload.secure_url;
-    product.qrCodeId = qrUpload.public_id;
+    // 3️⃣ Remove barcodes (remove both for legacy support)
+    const removedScannedBarcode = product.scannedBarcodeId;
+    const removedGeneratedBarcode = product.barcodeId;
+    
+    product.scannedBarcodeId = null;
+    product.barcodeId = null;
+    
+    // Also delete generated barcode image if exists
+    if (product.barcodeUrl) {
+      try {
+        const publicId = product.barcodeUrl.split('/').pop().split('.')[0];
+        const fullPublicId = `dairy9/products/barcode/${publicId}`;
+        await deleteFromCloudinary(fullPublicId);
+      } catch (deleteError) {
+        console.error('Error deleting barcode image:', deleteError);
+      }
+      product.barcodeUrl = null;
+    }
+    
     await product.save();
+
+    const updatedProduct = await Product.findById(id)
+      .populate('category', 'name');
+
+    const productWithBarcodeInfo = {
+      ...updatedProduct.toObject(),
+      hasGeneratedBarcode: false,
+      hasScannedBarcode: false,
+      activeBarcodeId: null,
+      barcodeType: 'none'
+    };
 
     res.status(200).json({
       success: true,
-      message: 'QR code generated successfully',
-      qrCodeUrl: qrUpload.secure_url
+      message: 'All barcodes removed successfully',
+      removedBarcodes: {
+        scanned: removedScannedBarcode,
+        generated: removedGeneratedBarcode
+      },
+      product: productWithBarcodeInfo
     });
 
   } catch (error) {
-    console.error('QR Generation Error:', error);
-    res.status(500).json({ success: false, message: 'Failed to generate QR', error: error.message });
+    console.error('Barcode Removal Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during barcode removal',
+      error: error.message
+    });
   }
 };
 
-
-
-
-// 🎯 Decode QR — when user scans and sends data
-export const scanProductQR = async (req, res) => {
+// @desc    Get products with barcode status
+// @route   GET /api/catalog/products/barcode/status
+// @access  Private (Admin)
+export const getProductsBarcodeStatus = async (req, res) => {
   try {
-    const { productId } = req.body; // Data extracted from QR scanner app
+    const { status, page = 1, limit = 20 } = req.query;
 
-    const product = await Product.findById(productId);
-    if (!product) {
-      return res.status(404).json({ message: "Product not found" });
+    let filter = { isAvailable: true };
+    
+    // Filter by barcode status
+    switch (status) {
+      case 'with-barcode':
+        filter.$or = [
+          { scannedBarcodeId: { $exists: true, $ne: null } },
+          { barcodeId: { $exists: true, $ne: null } }
+        ];
+        break;
+      case 'scanned-only':
+        filter.scannedBarcodeId = { $exists: true, $ne: null };
+        break;
+      case 'generated-only':
+        filter.barcodeId = { $exists: true, $ne: null };
+        break;
+      case 'without-barcode':
+        filter.scannedBarcodeId = null;
+        filter.barcodeId = null;
+        break;
+      default:
+        // No filter - return all
+        break;
     }
 
-    res.status(200).json({
-      message: "QR scan successful",
-      product,
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    const products = await Product.find(filter)
+      .populate('category', 'name')
+      .sort({ name: 1 })
+      .skip(skip)
+      .limit(limitNum)
+      .lean();
+
+    const productsWithBarcodeInfo = products.map(product => ({
+      ...product,
+      discountedPrice: product.price - (product.price * (product.discount || 0) / 100),
+      hasGeneratedBarcode: !!product.barcodeId,
+      hasScannedBarcode: !!product.scannedBarcodeId,
+      activeBarcodeId: product.scannedBarcodeId || product.barcodeId,
+      barcodeType: product.scannedBarcodeId ? 'scanned' : (product.barcodeId ? 'generated' : 'none')
+    }));
+
+    const total = await Product.countDocuments(filter);
+    const totalPages = Math.ceil(total / limitNum);
+
+    // Get barcode statistics
+    const totalProducts = await Product.countDocuments({ isAvailable: true });
+    const withScannedBarcode = await Product.countDocuments({ 
+      isAvailable: true, 
+      scannedBarcodeId: { $exists: true, $ne: null } 
     });
+    const withGeneratedBarcode = await Product.countDocuments({ 
+      isAvailable: true, 
+      barcodeId: { $exists: true, $ne: null } 
+    });
+    const withAnyBarcode = await Product.countDocuments({
+      isAvailable: true,
+      $or: [
+        { scannedBarcodeId: { $exists: true, $ne: null } },
+        { barcodeId: { $exists: true, $ne: null } }
+      ]
+    });
+    const withoutBarcode = totalProducts - withAnyBarcode;
+
+    res.status(200).json({
+      success: true,
+      products: productsWithBarcodeInfo,
+      statistics: {
+        totalProducts,
+        withScannedBarcode,
+        withGeneratedBarcode,
+        withAnyBarcode,
+        withoutBarcode
+      },
+      pagination: {
+        currentPage: pageNum,
+        totalPages,
+        totalProducts: total,
+        hasNext: pageNum < totalPages,
+        hasPrev: pageNum > 1
+      }
+    });
+
   } catch (error) {
-    console.error("Error scanning QR:", error);
-    res.status(500).json({ message: "Internal server error" });
+    console.error('Get Products Barcode Status Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
   }
 };
