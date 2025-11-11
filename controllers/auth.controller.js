@@ -252,7 +252,7 @@ export async function verifyOTP(req, res) {
     const user = await User.findOne({ phone })
       .populate('customerProfile')
       .populate('adminProfile')
-      .select('+superadminPassword'); // include hashed secret for superadmin
+      .select('+superadminPassword');
 
     if (!user) {
       return res.status(404).json({ 
@@ -277,13 +277,27 @@ export async function verifyOTP(req, res) {
     user.otp = undefined;
     await user.save();
 
-    // 🧭 SuperAdmin path — don’t log in yet, move to next step
+    // 🧭 SuperAdmin path — don't log in yet, move to next step
     if (user.role === 'superadmin') {
+      // Create session token for password step
+      const sessionToken = jwt.sign(
+        { 
+          id: user._id, 
+          phone: user.phone, 
+          role: user.role,
+          step: 'password_required',
+          temp: true 
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: '10m' } // 10 minutes expiry
+      );
+
       return res.status(200).json({
         success: true,
         message: 'OTP verified successfully. Please enter secret key.',
         requirePassword: true,
-        phone: user.phone
+        phone: user.phone,
+        sessionToken // Send temporary token for password step
       });
     }
 
@@ -317,7 +331,102 @@ export async function verifyOTP(req, res) {
   }
 }
 
+// @desc    Verify Super Admin Secret Key (Step 2)
+// @route   POST /api/auth/verify-superadmin-password
+// @access  Public (but requires OTP session)
+export async function verifySuperAdminPassword(req, res) {
+  try {
+    const { phone, secretKey, sessionToken } = req.body;
 
+    if (!phone || !secretKey || !sessionToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone, secret key, and session token are required'
+      });
+    }
+
+    // Verify session token first
+    let decoded;
+    try {
+      decoded = jwt.verify(sessionToken, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired session. Please verify OTP again.'
+      });
+    }
+
+    // Validate session claims
+    if (decoded.phone !== phone || decoded.step !== 'password_required' || decoded.role !== 'superadmin') {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid session. Please complete OTP verification first.'
+      });
+    }
+
+    // Get user with superadmin password
+    const user = await User.findOne({ 
+      phone, 
+      role: 'superadmin',
+      isVerified: true 
+    }).select('+superadminPassword');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'SuperAdmin not found or not verified'
+      });
+    }
+
+    // Check if secret key is set up
+    if (!user.superadminPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Secret key not set up for this account'
+      });
+    }
+
+    // Verify secret key
+    const isPasswordValid = await bcrypt.compare(secretKey, user.superadminPassword);
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid secret key'
+      });
+    }
+
+    // Generate final access token
+    const accessToken = jwt.sign(
+      {
+        id: user._id,
+        phone: user.phone,
+        role: user.role,
+        isSuperAdmin: true
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'SuperAdmin authentication successful',
+      token: accessToken,
+      user: {
+        id: user._id,
+        phone: user.phone,
+        role: user.role,
+        isVerified: user.isVerified
+      }
+    });
+
+  } catch (error) {
+    console.error('SuperAdmin Password Verification Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during password verification'
+    });
+  }
+}
 
 
 // @desc    Resend OTP
@@ -364,6 +473,9 @@ export async function resendOTP(req, res) {
     });
   }
 }
+
+
+
 
 // @desc    Get current user profile
 // @route   GET /api/auth/me

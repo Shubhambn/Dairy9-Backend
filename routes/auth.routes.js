@@ -8,6 +8,7 @@ import {
 } from '../controllers/auth.controller.js';
 import auth from '../middlewares/auth.js';
 import { authRateLimit } from '../middlewares/ratelimiter.js';
+import { verifySuperAdminPassword } from '../controllers/auth.controller.js';
 
 const router = Router();
 
@@ -16,6 +17,9 @@ router.post('/send-otp', authRateLimit, sendOTP);
 router.post('/verify-otp', authRateLimit, verifyOTP);
 router.post('/signup', authRateLimit, signup);
 router.post('/resend-otp', authRateLimit, resendOTP);
+
+// For SuperAdmin
+router.post('/superadmin/verify-password', verifySuperAdminPassword);
 
 // Protected routes (require authentication)
 router.get('/me', auth, getCurrentUser);
