@@ -8,7 +8,8 @@ import {
   getLowStockAlerts,
   getInventoryLogs,
   updateInventoryItem,
-  getInventoryAnalytics
+  getInventoryAnalytics,
+  addStockToInventory
 } from '../controllers/inventory.controller.js';
 
 const router = express.Router();
@@ -27,12 +28,14 @@ const requireRetailer = (req, res, next) => {
   next();
 };
 
+
 // Apply retailer middleware to all routes
 router.use(requireRetailer);
 
 // Inventory management routes
 router.get('/', getRetailerInventory);
 router.post('/products', addProductToInventory);
+router.post('/stock/add', addStockToInventory);
 router.put('/stock', updateInventoryStock);
 router.put('/products/:inventoryId', updateInventoryItem);
 

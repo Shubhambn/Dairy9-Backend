@@ -70,6 +70,24 @@ export const validateAddProduct = [
     .withMessage('isActive must be a boolean value')
 ];
 
+export const validateAddStock = [
+  body('productId').isMongoId().withMessage('Valid product ID is required'),
+  body('quantity').isInt({ min: 1 }).withMessage('Quantity must be a positive integer'),
+  body('transactionType')
+    .optional()
+    .isIn(['STOCK_IN', 'STOCK_OUT', 'STOCK_ADJUSTMENT', 'COMMITMENT', 'RELEASE_COMMITMENT'])
+    .withMessage('Valid transaction type is required'),
+  body('reason')
+    .optional()
+    .isIn(['PURCHASE', 'RETURN', 'SALE', 'ADJUSTMENT', 'INITIAL', 'ORDER_RESERVATION', 'ORDER_CANCELLED'])
+    .withMessage('Valid reason is required'),
+  body('unitCost').optional().isFloat({ min: 0 }).withMessage('unitCost must be a non-negative number'),
+  body('notes').optional().isString().isLength({ max: 500 }).withMessage('Notes must be less than 500 characters')
+];
+
+
+
+
 // Helper to get retailer from user
 const getRetailerFromUser = async (userId) => {
   const retailer = await Admin.findOne({ user: userId });
@@ -105,6 +123,10 @@ export const getRetailerInventory = asyncHandler(async (req, res) => {
     });
   }
 });
+
+
+
+
 
 /**
  * @desc    Add product to inventory
@@ -237,6 +259,141 @@ export const addProductToInventory = [
       res.status(500).json({
         success: false,
         message: 'Server error while adding product to inventory',
+        error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+      });
+    }
+  })
+];
+
+
+
+export const addStockToInventory = [
+  validateAddStock,
+  asyncHandler(async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed',
+          errors: errors.array()
+        });
+      }
+
+      const { productId, quantity, transactionType = 'STOCK_IN', reason = 'PURCHASE', notes } = req.body;
+
+      // Get retailer from user
+      const retailer = await getRetailerFromUser(req.user._id);
+
+      // Find existing inventory item
+      const inventoryItem = await RetailerInventory.findOne({
+        retailer: retailer._id,
+        product: productId
+      });
+
+      if (!inventoryItem) {
+        return res.status(404).json({
+          success: false,
+          message: 'Product not found in retailer inventory. Add the product first.'
+        });
+      }
+
+      // Add stock to currentStock
+      const previousStock = inventoryItem.currentStock || 0;
+      inventoryItem.currentStock = previousStock + parseInt(quantity, 10);
+
+      // Update timestamps and optional fields
+      inventoryItem.lastRestocked = new Date();
+      inventoryItem.lastUpdated = new Date();
+
+      // If the incoming payload included sellingPrice or costPrice, update them (optional)
+      if (req.body.sellingPrice !== undefined) inventoryItem.sellingPrice = req.body.sellingPrice;
+      if (req.body.costPrice !== undefined) inventoryItem.costPrice = req.body.costPrice;
+
+      // If item was inactive, optionally reactivate (business decision)
+      if (inventoryItem.isActive === false) {
+        inventoryItem.isActive = true;
+      }
+
+      // Save updated inventory
+      await inventoryItem.save();
+
+      // Record a stock log via InventoryService (best practice) — falls back to minimal log code if service not available
+      try {
+        if (InventoryService && typeof InventoryService.recordStockUpdate === 'function') {
+          await InventoryService.recordStockUpdate({
+            retailerId: retailer._id,
+            inventoryId: inventoryItem._id,
+            productId,
+            userId: req.user._id,
+            quantity: parseInt(quantity, 10),
+            transactionType,
+            reason,
+            notes,
+            previousStock,
+            newStock: inventoryItem.currentStock,
+            ipAddress: req.ip,
+            userAgent: req.get('User-Agent')
+          });
+        } else {
+          // Optional minimal log if service not available:
+          const logEntry = new InventoryLog({
+            retailer: retailer._id,
+            inventory: inventoryItem._id,
+            product: productId,
+            type: transactionType,
+            reason,
+            qty: parseInt(quantity, 10),
+            previousStock,
+            newStock: inventoryItem.currentStock,
+            notes,
+            createdBy: req.user._id,
+            ipAddress: req.ip,
+            userAgent: req.get('User-Agent')
+          });
+          await logEntry.save();
+        }
+      } catch (logErr) {
+        // Logging should not block main flow — but surface a non-fatal warning
+        console.warn('Failed to record inventory log:', logErr);
+      }
+
+      // Populate product and retailer fields for response (optional)
+      await inventoryItem.populate('product', 'name description price discount unit unitSize image');
+      await inventoryItem.populate('retailer', 'businessName');
+
+      res.json({
+        success: true,
+        message: 'Stock added successfully',
+        data: {
+          _id: inventoryItem._id,
+          retailer: inventoryItem.retailer,
+          product: inventoryItem.product,
+          productName: inventoryItem.productName,
+          previousStock,
+          addedQuantity: parseInt(quantity, 10),
+          currentStock: inventoryItem.currentStock,
+          availableStock: inventoryItem.availableStock, // virtual
+          sellingPrice: inventoryItem.sellingPrice,
+          costPrice: inventoryItem.costPrice,
+          lastRestocked: inventoryItem.lastRestocked,
+          lastUpdated: inventoryItem.lastUpdated
+        }
+      });
+
+    } catch (error) {
+      console.error('Add stock error:', error);
+
+      if (error.name === 'CastError') {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid product or inventory ID'
+        });
+      }
+
+      res.status(500).json({
+        success: false,
+        message: 'Server error while adding stock',
         error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
       });
     }
