@@ -1,3 +1,5 @@
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\models\customer.model.js
+
 import mongoose from "mongoose";
 
 const customerSchema = new mongoose.Schema({
@@ -25,6 +27,16 @@ const customerSchema = new mongoose.Schema({
     },
     formattedAddress: String
   },
+  // NEW: assigned retailer for this customer (auto-assigned based on location)
+  assignedRetailer: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Admin",
+    default: null
+  },
+  assignedOn: {
+    type: Date,
+    default: null
+  },
   preferences: {
     deliveryTime: String,
     notifications: {
@@ -33,6 +45,20 @@ const customerSchema = new mongoose.Schema({
       push: { type: Boolean, default: true }
     }
   },
+
+  currentLocation: {
+  coordinates: {
+    latitude: { type: Number, default: null },
+    longitude: { type: Number, default: null }
+  },
+  formattedAddress: { type: String, default: "" },
+  updatedAt: { type: Date, default: null }
+},
+currentRetailer: {
+  type: mongoose.Schema.Types.ObjectId,
+  ref: "Admin",
+  default: null
+},
   orderHistory: [{
     orderId: String,
     products: [{
@@ -53,6 +79,9 @@ const customerSchema = new mongoose.Schema({
 // Add index for better query performance
 customerSchema.index({ user: 1 });
 customerSchema.index({ 'deliveryAddress.pincode': 1 });
+
+// Optional index to quickly query by assignedRetailer
+customerSchema.index({ assignedRetailer: 1 });
 
 const Customer = mongoose.model('Customer', customerSchema);
 export default Customer;

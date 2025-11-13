@@ -63,6 +63,7 @@ export const getRetailerInventory = asyncHandler(async (req, res) => {
 
     const result = await InventoryService.getRetailerInventory(retailer._id, filters);
 
+    
     res.json({
       success: true,
       data: result

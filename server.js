@@ -15,6 +15,7 @@ import retailerOrderRoutes from './routes/retailer.order.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import locationRoutes from './routes/location.routes.js';
+import customerProductRoutes from './routes/customerProduct.routes.js';
 
 // Import inventory routes (NEW)
 import inventoryRoutes from './routes/inventory.routes.js';
@@ -45,6 +46,8 @@ app.use('/api/location', locationRoutes);
 
 // 👇 ADD INVENTORY ROUTES
 app.use('/api/retailer/inventory', inventoryRoutes);
+
+app.use('/api/customer/products', customerProductRoutes);
 
 app.get('/', (req, res) => res.json({ 
   message: 'Dairy9 Backend Running',

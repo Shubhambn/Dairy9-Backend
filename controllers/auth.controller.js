@@ -1,7 +1,10 @@
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\controllers\auth.controller.js
+
 import User from '../models/user.model.js';
 import Customer from '../models/customer.model.js';
 import Admin from '../models/admin.model.js';
 import jwt from 'jsonwebtoken';
+import { assignNearestRetailer } from '../utils/retailerAssignment.js'; // NEW
 
 // Helper function to generate OTP
 const generateOTP = () => {
@@ -281,6 +284,31 @@ export async function verifyOTP(req, res) {
     user.otp = undefined;
     await user.save();
 
+    // If user is a customer, attempt to auto-assign nearest retailer based on stored deliveryAddress coordinates
+    if (user.role === 'customer' && user.customerProfile) {
+      try {
+        const customer = await Customer.findById(user.customerProfile);
+        const coords = customer.deliveryAddress?.coordinates;
+
+        if (coords && typeof coords.latitude === 'number' && typeof coords.longitude === 'number') {
+          const result = await assignNearestRetailer(coords.latitude, coords.longitude);
+          if (result && result.retailer) {
+            customer.assignedRetailer = result.retailer._id;
+            customer.assignedOn = new Date();
+            await customer.save();
+            console.log('✅ Retailer auto-assigned on login:', result.retailer.shopName);
+          } else {
+            console.log('⚠ No nearby retailer found during login assignment');
+          }
+        } else {
+          console.log('⚠ Customer has no coordinates to assign retailer on login');
+        }
+      } catch (err) {
+        console.error('Error while assigning retailer on login:', err);
+        // non-fatal: continue login
+      }
+    }
+
     // Generate JWT token
     const token = jwt.sign(
       { 
@@ -295,7 +323,7 @@ export async function verifyOTP(req, res) {
     // Prepare profile data
     let profile = null;
     if (user.role === 'customer' && user.customerProfile) {
-      profile = user.customerProfile;
+      profile = await Customer.findById(user.customerProfile).populate('assignedRetailer', 'shopName location serviceRadius'); // include assignedRetailer details
     } else if ((user.role === 'admin' || user.role === 'retailer') && user.adminProfile) {
       profile = user.adminProfile;
     }
@@ -320,6 +348,7 @@ export async function verifyOTP(req, res) {
     });
   }
 }
+
 
 // @desc    Resend OTP
 // @route   POST /api/auth/resend-otp
@@ -365,6 +394,8 @@ export async function resendOTP(req, res) {
     });
   }
 }
+
+
 
 // @desc    Get current user profile
 // @route   GET /api/auth/me

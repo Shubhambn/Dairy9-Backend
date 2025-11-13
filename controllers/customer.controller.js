@@ -1,8 +1,9 @@
 // C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\controllers\customer.controller.js
 
-
 import Customer from '../models/customer.model.js';
 import User from '../models/user.model.js';
+import { assignNearestRetailer } from '../utils/retailerAssignment.js';
+import { validateCoordinates } from '../utils/locationUtils.js';
 
 // Create or Update Customer Profile
 export const createUpdateProfile = async (req, res) => {
@@ -44,6 +45,24 @@ export const createUpdateProfile = async (req, res) => {
     // Link customer profile to user
     await User.findByIdAndUpdate(userId, { customerProfile: customer._id });
 
+    // If coordinates provided, try assigning nearest retailer
+    const coords = customer.deliveryAddress?.coordinates;
+    if (coords && typeof coords.latitude === 'number' && typeof coords.longitude === 'number') {
+      try {
+        const result = await assignNearestRetailer(coords.latitude, coords.longitude);
+        if (result?.retailer) {
+          customer.assignedRetailer = result.retailer._id;
+          customer.assignedOn = new Date();
+          await customer.save();
+          console.log('✅ Retailer auto-assigned on profile save:', result.retailer.shopName);
+        } else {
+          console.log('⚠ No retailer found when saving profile');
+        }
+      } catch (err) {
+        console.error('Error assigning retailer on profile save:', err);
+      }
+    }
+
     res.status(200).json({
       message: 'Profile saved successfully',
       customer
@@ -53,11 +72,12 @@ export const createUpdateProfile = async (req, res) => {
   }
 };
 
-// Get Customer Profile
+// Get Customer Profile (unchanged)...
 export const getProfile = async (req, res) => {
   try {
     let customer = await Customer.findOne({ user: req.user._id })
-      .populate('user', 'phone');
+      .populate('user', 'phone')
+      .populate('assignedRetailer', 'shopName location serviceRadius');
 
     if (!customer) {
       // Create a default profile structure if none exists
@@ -99,7 +119,7 @@ export const getProfile = async (req, res) => {
   }
 };
 
-// Add Order to Customer History
+// Add Order to Customer History (unchanged)...
 export const addOrder = async (req, res) => {
   try {
     const { products, totalAmount } = req.body;
@@ -125,7 +145,6 @@ export const addOrder = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
-
 
 // @desc    Update customer delivery address
 // @route   PUT /api/customer/address
@@ -166,6 +185,27 @@ export const updateDeliveryAddress = async (req, res) => {
 
     await customer.save();
 
+    // Try reassigning retailer when address has coordinates
+    const coords = customer.deliveryAddress?.coordinates;
+    if (coords && typeof coords.latitude === 'number' && typeof coords.longitude === 'number') {
+      try {
+        const result = await assignNearestRetailer(coords.latitude, coords.longitude);
+        if (result?.retailer) {
+          customer.assignedRetailer = result.retailer._id;
+          customer.assignedOn = new Date();
+          await customer.save();
+          console.log('🔄 Retailer reassigned on address update:', result.retailer.shopName);
+        } else {
+          console.log('⚠ No retailer found in new address area');
+          // Optionally set assignedRetailer = null if you want to remove previous assignment when none found
+          // customer.assignedRetailer = null;
+          // await customer.save();
+        }
+      } catch (err) {
+        console.error('Error while reassigning retailer on address update:', err);
+      }
+    }
+
     res.status(200).json({
       success: true,
       message: 'Delivery address updated successfully',
@@ -189,7 +229,7 @@ export const addAddressCoordinates = async (req, res) => {
     const userId = req.user._id;
     const { latitude, longitude } = req.body;
 
-    if (!latitude || !longitude) {
+    if (latitude === undefined || longitude === undefined) {
       return res.status(400).json({
         success: false,
         message: 'Latitude and longitude are required'
@@ -226,6 +266,21 @@ export const addAddressCoordinates = async (req, res) => {
 
     await customer.save();
 
+    // Assign nearest retailer immediately
+    try {
+      const result = await assignNearestRetailer(latitude, longitude);
+      if (result?.retailer) {
+        customer.assignedRetailer = result.retailer._id;
+        customer.assignedOn = new Date();
+        await customer.save();
+        console.log('✅ Retailer assigned on coordinates add:', result.retailer.shopName);
+      } else {
+        console.log('⚠ No retailer found for provided coordinates');
+      }
+    } catch (err) {
+      console.error('Error assigning retailer on coordinates add:', err);
+    }
+
     res.status(200).json({
       success: true,
       message: 'Address coordinates updated successfully',
@@ -241,7 +296,7 @@ export const addAddressCoordinates = async (req, res) => {
   }
 };
 
-// Get Order History
+// Get Order History (unchanged)...
 export const getOrderHistory = async (req, res) => {
   try {
     const customer = await Customer.findOne({ user: req.user._id });

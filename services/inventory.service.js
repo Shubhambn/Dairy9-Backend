@@ -388,6 +388,43 @@ class InventoryService {
                 RetailerInventory.countDocuments(query)
             ]);
 
+
+            // ✅ FIX: Use unitSize instead of unit for display - sirf numeric quantity dikhao
+        const formattedInventory = inventory.map(item => {
+            // Product ka unitSize use karo (e.g., 200) aur unit alag field mein rakh do
+            const productUnitSize = item.product?.unitSize || 0;
+            const currentStock = item.currentStock || 0;
+            const committedStock = item.committedStock || 0;
+            
+            // Agar currentStock already numeric hai toh wahi use karo, nahi toh unitSize use karo
+            const formattedCurrentStock = typeof currentStock === 'number' ? currentStock : productUnitSize;
+            const formattedAvailableStock = formattedCurrentStock - committedStock;
+
+            console.log(`🔄 Formatting: ${item.product?.name}`, {
+                unitSize: productUnitSize,
+                currentStock: currentStock,
+                formattedCurrentStock: formattedCurrentStock,
+                unit: item.product?.unit
+            });
+
+            return {
+                ...item,
+                // ✅ Sirf numeric values return karo
+                currentStock: formattedCurrentStock,
+                availableStock: formattedAvailableStock,
+                // Unit alag field mein rahega agar kabhi display karna ho
+                displayUnit: item.product?.unit || '',
+                // Original product data bhi rahega
+                product: {
+                    ...item.product,
+                    // Product level par bhi unitSize hi dikhao
+                    displayQuantity: productUnitSize,
+                    unit: item.product?.unit || '' // Unit alag se available hai
+                }
+            };
+        });
+
+
             // FIXED: Calculate summary stats using JavaScript for accurate calculations
             let totalInventoryValue = 0;
             let totalSalesValue = 0;
@@ -426,9 +463,9 @@ class InventoryService {
             });
 
             const result = {
-                inventory,
+                inventory: formattedInventory,
                 summary: {
-                    totalProducts: inventory.length,
+                    totalProducts: formattedInventory.length,
                     totalInventoryValue, // Total value of all current stock × SELLING PRICE
                     totalSalesValue,     // Total value of all sales × SELLING PRICE
                     lowStockCount,

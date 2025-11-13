@@ -1,3 +1,5 @@
+// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\customer.routes.js
+
 import express from 'express';
 import { 
   createUpdateProfile, 
@@ -7,6 +9,7 @@ import {
   updateDeliveryAddress,
   addAddressCoordinates 
 } from '../controllers/customer.controller.js';
+import { updateCurrentLocation } from "../controllers/location.controller.js";
 import auth from '../middlewares/auth.js';
 
 const router = express.Router();
@@ -17,6 +20,7 @@ router.use(auth);
 // Profile routes
 router.post('/profile', createUpdateProfile);
 router.get('/profile', getProfile);
+router.put("/location/current", auth, updateCurrentLocation);
 
 // Order history routes
 router.post('/orders', addOrder);
