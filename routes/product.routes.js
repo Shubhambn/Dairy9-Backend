@@ -21,7 +21,10 @@ import {
   createProductFromBarcode,
   scanBarcodeForProductData,
   createProductFromScanData,
-  // Legacy barcode functions (for backward compatibility)
+  // NEW: Critical missing functions for offline orders
+  getProductByAnyBarcode,
+  searchProductByBarcode,
+  // Legacy barcode functions
   updateProductBarcode,
   removeProductBarcode
 } from '../controllers/product.controller.js';
@@ -37,8 +40,14 @@ const router = express.Router();
 router.get('/', getAllProducts);
 router.get('/featured', getFeaturedProducts);
 router.get('/search', searchProducts);
-router.get('/barcode/:barcodeId', getProductByBarcode);
+
+// 🎯 CRITICAL FIX: Unified barcode lookup endpoint for offline orders
+router.get('/barcode/:barcodeId', getProductByAnyBarcode); // CHANGED: Unified endpoint
+router.get('/barcode-lookup/:barcodeId', getProductByBarcode); // ADDED: Alternative endpoint
+
+// 🎯 ENHANCED: Public barcode scanning for offline orders
 router.post('/scan', scanBarcode);
+router.post('/scan-public', scanBarcode); // ADDED: Public scanning alias
 
 // =============================================
 // PROTECTED ADMIN ROUTES (Static routes first)
@@ -55,6 +64,9 @@ router.post('/create-from-scan', auth, adminAuth, createProductFromScanData);
 // =============================================
 router.get('/:id', getProductById);
 router.get('/:id/barcode-info', getProductBarcodeInfo);
+
+// 🎯 CRITICAL ADDITION: Direct product lookup by ID (for generated barcodes)
+router.get('/id/:productId', getProductById); // ADDED: Alternative ID endpoint
 
 // Product CRUD operations
 router.post('/', auth, adminAuth, upload.fields([

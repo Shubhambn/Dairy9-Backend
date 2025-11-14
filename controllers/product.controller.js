@@ -2092,3 +2092,114 @@ export const createProductFromScanData = async (req, res) => {
     });
   }
 };
+
+
+// 🎯 CRITICAL: Unified barcode lookup for offline orders
+export const getProductByAnyBarcode = async (req, res) => {
+  try {
+    const { barcodeId } = req.params;
+    
+    console.log('🔍 Unified barcode lookup for:', barcodeId);
+
+    // 1. First try: Search by scanned barcode
+    let product = await Product.findOne({ 
+      scannedBarcodeId: barcodeId 
+    }).populate('category');
+
+    // 2. Second try: Search by generated barcode
+    if (!product) {
+      product = await Product.findOne({ 
+        barcodeId: barcodeId 
+      }).populate('category');
+    }
+
+    // 3. Third try: Search by product ID (for generated barcodes using product ID)
+    if (!product) {
+      product = await Product.findById(barcodeId).populate('category');
+    }
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found for this barcode',
+        barcodeId
+      });
+    }
+
+    // Return product in the format expected by offline orders
+    res.json({
+      success: true,
+      product: {
+        _id: product._id,
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        discountedPrice: product.discount > 0 
+          ? product.price * (1 - product.discount / 100)
+          : product.price,
+        discount: product.discount || 0,
+        image: product.image,
+        category: product.category,
+        unit: product.unit,
+        unitSize: product.unitSize,
+        milkType: product.milkType,
+        nutritionalInfo: product.nutritionalInfo,
+        tags: product.tags,
+        isFeatured: product.isFeatured,
+        isAvailable: product.isAvailable,
+        stock: product.stock || 0,
+        barcodeId: product.barcodeId,
+        scannedBarcodeId: product.scannedBarcodeId,
+        createdAt: product.createdAt,
+        updatedAt: product.updatedAt
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Unified barcode lookup error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to lookup product by barcode',
+      error: error.message
+    });
+  }
+};
+
+// 🎯 Alternative: Simple barcode search
+export const searchProductByBarcode = async (req, res) => {
+  try {
+    const { barcodeId } = req.params;
+    
+    console.log('🔍 Searching product by barcode:', barcodeId);
+
+    // Search in both barcode fields
+    const product = await Product.findOne({
+      $or: [
+        { barcodeId: barcodeId },
+        { scannedBarcodeId: barcodeId },
+        { _id: barcodeId } // Also try as product ID
+      ]
+    }).populate('category');
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found',
+        barcodeId
+      });
+    }
+
+    res.json({
+      success: true,
+      product
+    });
+
+  } catch (error) {
+    console.error('❌ Barcode search error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to search product by barcode',
+      error: error.message
+    });
+  }
+};
