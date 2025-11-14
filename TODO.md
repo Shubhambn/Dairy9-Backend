@@ -1,29 +1,20 @@
-# COMPLETED: Barcode Overlay with Product Size and Highlighting ✅
+# TODO: Implement Barcode Scanning Feature for Product Creation
 
-## Status: IMPLEMENTED
-The barcode overlay functionality has been successfully implemented with the following features:
+## Current Status
+- [x] Analyzed existing codebase (OpenFoodFacts service, product model, routes)
+- [x] Created implementation plan
+- [x] Got user approval
+- [x] Added `createProductFromBarcode` function to `controllers/product.controller.js`
+- [x] Added new route `/api/catalog/products/scan-create` to `routes/product.routes.js`
 
-### ✅ Completed Features:
-- **Product Size Display**: Barcodes now show product name with size (e.g., "Milk 500 ml")
-- **Enhanced Text Highlighting**: 
-  - Text size increased to 24px (from 18px)
-  - Bold Helvetica font for better visibility
-  - Centered alignment with proper spacing
-- **Smart Truncation**: Display name limited to 30 characters with "..." for long names
-- **Fallback Display**: Shows "ID: {barcodeText}" if no product name provided
+## Implementation Steps
+- [ ] Test the new endpoint functionality
+- [ ] Verify barcode assignment and data pre-filling works correctly
 
-### 📁 Files Updated:
-- `utils/barcodeGen.utils.js`: Enhanced `generateBarcode` function with size formatting and larger text
-- `controllers/product.controller.js`: Updated calls to pass `unitSize` and `unit` parameters
-
-### 🔧 Technical Details:
-- Uses bwip-js library for barcode generation
-- No external dependencies for text overlay (built-in bwip-js text rendering)
-- Automatic size formatting: `{productName} {unitSize} {unit}`
-- Example: "Fresh Milk 500 ml" or "ID: 507f1f77bcf86cd799439011"
-
-### ✅ Verification:
-- Barcode generation tested and working
-- Text appears bold and prominently sized
-- Size information correctly displayed
-- No length or display issues observed
+## Details
+- Function will take barcode as input
+- Fetch product data from OpenFoodFacts API
+- Pre-fill product creation form with fetched data
+- Allow manual overrides for any fields
+- Assign scanned barcode to the product
+- Handle cases where barcode is not found in OpenFoodFacts

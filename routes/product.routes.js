@@ -18,6 +18,9 @@ import {
   scanBarcode,
   getProductBarcodeInfo,
   getProductsBarcodeStatus,
+  createProductFromBarcode,
+  scanBarcodeForProductData,
+  createProductFromScanData,
   // Legacy barcode functions (for backward compatibility)
   updateProductBarcode,
   removeProductBarcode
@@ -34,13 +37,18 @@ const router = express.Router();
 router.get('/', getAllProducts);
 router.get('/featured', getFeaturedProducts);
 router.get('/search', searchProducts);
-router.get('/barcode/:barcodeId', getProductByBarcode); // Static barcode route
-router.post('/scan', scanBarcode); // Static scan route
+router.get('/barcode/:barcodeId', getProductByBarcode);
+router.post('/scan', scanBarcode);
 
 // =============================================
 // PROTECTED ADMIN ROUTES (Static routes first)
 // =============================================
 router.get('/barcode/status', auth, adminAuth, getProductsBarcodeStatus);
+
+// 🎯 ENHANCED BARCODE SCANNING ROUTES
+router.post('/scan-barcode', auth, adminAuth, scanBarcodeForProductData);
+router.post('/scan-create', auth, adminAuth, createProductFromBarcode);
+router.post('/create-from-scan', auth, adminAuth, createProductFromScanData);
 
 // =============================================
 // PARAMETERIZED ROUTES (After static routes)
@@ -49,12 +57,20 @@ router.get('/:id', getProductById);
 router.get('/:id/barcode-info', getProductBarcodeInfo);
 
 // Product CRUD operations
-router.post('/', auth, adminAuth, upload.single('image'), createProduct);
-router.put('/:id', auth, adminAuth, upload.single('image'), updateProduct);
+router.post('/', auth, adminAuth, upload.fields([
+  { name: 'image', maxCount: 1 },
+  { name: 'additionalImages', maxCount: 10 }
+]), createProduct);
+
+router.put('/:id', auth, adminAuth, upload.fields([
+  { name: 'image', maxCount: 1 },
+  { name: 'additionalImages', maxCount: 10 }
+]), updateProduct);
+
 router.delete('/:id', auth, adminAuth, deleteProduct);
 
 // Product images
-router.post('/:id/images', auth, adminAuth, upload.array('images', 5), uploadProductImages);
+router.post('/:id/images', auth, adminAuth, upload.array('images', 10), uploadProductImages);
 router.delete('/:id/images/:imageId', auth, adminAuth, deleteProductImage);
 
 // 🎯 ENHANCED BARCODE MANAGEMENT ROUTES
