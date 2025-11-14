@@ -8,7 +8,7 @@ import { getAllRetailers, getRetailerDetails, updateRetailerStatus, getRetailerP
 import { getAllCustomers, getCustomerDetails, getCustomerOrders } from '../controllers/superadmin.customers.controller.js';
 import { generateSalesReport, generateRetailerPerformanceReport, generateCustomerAnalyticsReport, generateProductPerformanceReport, generateSystemOverviewReport } from '../controllers/superadmin.reports.controller.js';
 import { getActionLogs, clearOldLogs, exportLogs } from '../controllers/superadmin.logs.controller.js';
-
+import { getStockOrders,getStockOrderById,lockStockOrder ,releaseStockOrderLock,superAdminActOnOrder,getStockOrderTransactions,addNoteToStockOrder} from '../controllers/stockOrders.controller.js';
 const router = express.Router();
 
 // Test endpoint
@@ -34,9 +34,17 @@ router.get('/dashboard/real-time-stats', getRealTimeStats);
 
 // Retailers
 router.get('/retailers', getAllRetailers);
-router.get('/retailers/:id', getRetailerDetails);
+router.get('/retailers/:id', getRetailerDetails); 
 router.get('/retailers/:id/performance', getRetailerPerformance);
 router.patch('/retailers/:id/status', updateRetailerStatus);
+router.get('/stock-orders', getStockOrders); // list & filter
+router.get('/stock-orders/:id', getStockOrderById);
+router.post('/stock-orders/:id/lock', lockStockOrder);
+router.post('/stock-orders/:id/release-lock', releaseStockOrderLock);
+router.post('/stock-orders/:id/action', superAdminActOnOrder); // approve/fulfill/reject/partial
+router.get('/stock-orders/:id/transactions', getStockOrderTransactions);
+router.post('/stock-orders/:id/notes', addNoteToStockOrder); // both sides can add notes
+
 
 // Customers
 router.get('/customers', getAllCustomers);

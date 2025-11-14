@@ -1,9 +1,11 @@
-// server.js - SIMPLIFIED VERSION
+// server.js - UPDATED
 import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import connectDB from './config/db.js';
 import { productionConfig } from './config/production.js';
+import http from 'http';
+import { initSocket } from './lib/socket.js';
 
 // Import routes
 import authRoutes from './routes/auth.routes.js';
@@ -20,8 +22,6 @@ import { initializeSuperAdmin } from './config/initializeSuperAdmin.js';
 import inventoryRoutes from './routes/inventory.routes.js';
 import superadminRoutes from './routes/superadmin.routes.js';
 
-
-
 dotenv.config();
 const app = express();
 
@@ -32,8 +32,11 @@ app.use(cors(productionConfig.cors));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Connect to database
-connectDB();
+// Connect to database (non-blocking)
+connectDB().catch(err => {
+  console.error('Failed to connect to DB on startup:', err);
+  // optionally: process.exit(1);
+});
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -50,7 +53,7 @@ app.use('/api/location', locationRoutes);
 // 👇 ADD INVENTORY ROUTES
 app.use('/api/retailer/inventory', inventoryRoutes);
 
-app.get('/', (req, res) => res.json({ 
+app.get('/', (req, res) => res.json({
   message: 'Dairy9 Backend Running',
   timestamp: new Date().toISOString()
 }));
@@ -82,10 +85,30 @@ app.use('*', (req, res) => {
   });
 });
 
+// Create HTTP server and initialize Socket.IO
 const PORT = productionConfig.server.port;
-const HOST = productionConfig.server.host;
+const HOST = productionConfig.server.host || '0.0.0.0';
 
-app.listen(PORT, HOST, () => {
+const server = http.createServer(app);
+
+// Initialize Socket.IO and attach to app so controllers can use req.app.get('io')
+try {
+  const io = initSocket(server, {
+    cors: { origin: productionConfig.cors.origin || '*' },
+    // optional verifyToken: (token) => jwt.verify(token, process.env.JWT_SECRET)
+  });
+  app.set('io', io);
+  console.log('✅ Socket.IO initialized');
+} catch (e) {
+  console.warn('⚠️ Socket.IO initialization failed (will run without realtime):', e.message);
+}
+
+// Start server
+server.listen(PORT, HOST, () => {
   console.log(`✅ Server running on ${HOST}:${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  // optional init: create superadmin user if missing
+  if (typeof initializeSuperAdmin === 'function') {
+    initializeSuperAdmin().catch(err => console.warn('initializeSuperAdmin failed:', err));
+  }
 });
