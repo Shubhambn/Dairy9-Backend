@@ -36,7 +36,9 @@ const orderSchema = new mongoose.Schema({
   customer: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Customer',
-    required: true
+    required: function() {
+      return this.orderType === 'online';
+    }
   },
   items: [orderItemSchema],
   totalAmount: {
@@ -109,9 +111,19 @@ const orderSchema = new mongoose.Schema({
   specialInstructions: String,
   razorpayOrderId: String,
   razorpayPaymentId: String,
-  razorpaySignature: String
-}, { 
-  timestamps: true 
+  razorpaySignature: String,
+  orderType: {
+    type: String,
+    enum: ['online', 'offline'],
+    default: 'online'
+  },
+  processedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Admin',
+    index: true
+  }
+}, {
+  timestamps: true
 });
 
 // Indexes for better performance

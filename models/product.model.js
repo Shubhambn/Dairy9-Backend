@@ -5,22 +5,25 @@ import mongoose from 'mongoose';
 const productSchema = new mongoose.Schema({
   name: {
     type: String,
-    required: true,
-    trim: true
+    required: [true, 'Product name is required'],
+    trim: true,
+    maxlength: [100, 'Product name cannot exceed 100 characters']
   },
   description: {
     type: String,
-    required: true
+    required: true,
+    trim: true,
+    maxlength: [500, 'Description cannot exceed 500 characters']
   },
   price: {
     type: Number,
-    required: true,
-    min: 0
+    required: [true, 'Product price is required'],
+    min: [0, 'Price cannot be negative']
   },
   category: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Category',
-    required: true
+    required: [true, 'Product category is required']
   },
   image: {
     type: String,
@@ -31,8 +34,18 @@ const productSchema = new mongoose.Schema({
     default: null
   },
   images: [{
-    url: String,
-    publicId: String
+    url: {
+      type: String,
+      required: true
+    },
+    publicId: {
+      type: String,
+      required: true
+    },
+    uploadedAt: {
+      type: Date,
+      default: Date.now
+    }
   }],
   unit: {
     type: String,
@@ -41,12 +54,13 @@ const productSchema = new mongoose.Schema({
   },
   unitSize: {
     type: Number,
-    required: true
+    required: true,
+    min: [0, 'Unit size cannot be negative']
   },
   stock: {
     type: Number,
     default: 0,
-    min: 0
+    min: [0, 'Stock cannot be negative']
   },
   isAvailable: {
     type: Boolean,
@@ -58,12 +72,27 @@ const productSchema = new mongoose.Schema({
     default: 'Cow'
   },
   nutritionalInfo: {
-    fat: String,
-    protein: String,
-    calories: String,
-    carbohydrates: String
+    fat: {
+      type: String,
+      default: '0'
+    },
+    protein: {
+      type: String,
+      default: '0'
+    },
+    calories: {
+      type: String,
+      default: '0'
+    },
+    carbohydrates: {
+      type: String,
+      default: '0'
+    }
   },
-  tags: [String],
+  tags: [{
+    type: String,
+    trim: true
+  }],
   discount: {
     type: Number,
     default: 0,
@@ -75,28 +104,51 @@ const productSchema = new mongoose.Schema({
     default: false
   },
   rating: {
-    average: { type: Number, default: 0 },
-    count: { type: Number, default: 0 }
+    average: { 
+      type: Number, 
+      default: 0,
+      min: 0,
+      max: 5
+    },
+    count: { 
+      type: Number, 
+      default: 0,
+      min: 0
+    }
   },
-  qrCodeUrl: { 
-    type: String 
-  },    // URL or path to the generated QR image
-  qrCodeId: { 
-    type: String 
-  },
-  barcodeId:{
-    type:String
-  },
-  retailerId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "Retailer",
-  },    // optional unique ID if you manage QRs separately
+  
+  // ENHANCED BARCODE FIELDS
+  barcodeUrl: {
+    type: String,
+    sparse: true
+  },    // URL to the generated barcode image (system-generated)
+  barcodeId: {
+    type: String,
+    sparse: true,
+    trim: true
+  },    // Unique barcode string for generated barcodes (usually product ID)
+  
+  scannedBarcodeId: {
+    type: String,
+    sparse: true,
+    trim: true,
+    index: true
+  },    // Physical barcode scanned by user (takes priority)
+  
+  barcodeData: {
+    type: String,
+    sparse: true
+  }     // Additional barcode data if needed
 
 }, { 
   timestamps: true 
 });
 
-// Calculate discounted price - CORRECTED LOGIC
+// =============================================
+// VIRTUAL FIELDS FOR ENHANCED FUNCTIONALITY
+// =============================================
+
+// Calculate discounted price
 productSchema.virtual('discountedPrice').get(function() {
   if (this.discount > 0) {
     return this.price * (1 - this.discount / 100);
@@ -104,7 +156,7 @@ productSchema.virtual('discountedPrice').get(function() {
   return this.price;
 });
 
-// Calculate discount amount (optional but useful)
+// Calculate discount amount
 productSchema.virtual('discountAmount').get(function() {
   return this.price * (this.discount / 100);
 });
@@ -114,10 +166,362 @@ productSchema.virtual('isOnSale').get(function() {
   return this.discount > 0;
 });
 
+// =============================================
+// ENHANCED BARCODE VIRTUAL FIELDS
+// =============================================
+
+// Check if product has any barcode
+productSchema.virtual('hasBarcode').get(function() {
+  return !!(this.scannedBarcodeId || this.barcodeId);
+});
+
+// Get active barcode (scanned takes priority over generated)
+productSchema.virtual('activeBarcodeId').get(function() {
+  return this.scannedBarcodeId || this.barcodeId;
+});
+
+// Check if product has scanned barcode
+productSchema.virtual('hasScannedBarcode').get(function() {
+  return !!this.scannedBarcodeId;
+});
+
+// Check if product has generated barcode
+productSchema.virtual('hasGeneratedBarcode').get(function() {
+  return !!(this.barcodeId && this.barcodeUrl);
+});
+
+// Get barcode type
+productSchema.virtual('barcodeType').get(function() {
+  if (this.scannedBarcodeId) return 'scanned';
+  if (this.barcodeId) return 'generated';
+  return 'none';
+});
+
+// Get barcode display info
+productSchema.virtual('barcodeInfo').get(function() {
+  return {
+    hasBarcode: this.hasBarcode,
+    hasScannedBarcode: this.hasScannedBarcode,
+    hasGeneratedBarcode: this.hasGeneratedBarcode,
+    activeBarcodeId: this.activeBarcodeId,
+    barcodeType: this.barcodeType,
+    generated: this.barcodeId ? {
+      id: this.barcodeId,
+      url: this.barcodeUrl,
+      exists: true
+    } : { exists: false },
+    scanned: this.scannedBarcodeId ? {
+      id: this.scannedBarcodeId,
+      exists: true
+    } : { exists: false }
+  };
+});
+
+// Check if product is out of stock
+productSchema.virtual('isOutOfStock').get(function() {
+  return this.stock <= 0;
+});
+
+// Get stock status
+productSchema.virtual('stockStatus').get(function() {
+  if (this.stock <= 0) return 'out-of-stock';
+  if (this.stock < 10) return 'low-stock';
+  return 'in-stock';
+});
+
+// =============================================
+// INDEXES FOR OPTIMIZED QUERIES
+// =============================================
+
+// Single field indexes
+productSchema.index({ category: 1 });
+productSchema.index({ isAvailable: 1 });
+productSchema.index({ isFeatured: 1 });
+productSchema.index({ milkType: 1 });
+productSchema.index({ price: 1 });
+productSchema.index({ stock: 1 });
+productSchema.index({ createdAt: -1 });
+
+// Barcode indexes
+productSchema.index({ barcodeId: 1 }, { sparse: true });
+productSchema.index({ scannedBarcodeId: 1 }, { sparse: true });
+
+// Compound indexes for common queries
+productSchema.index({ isAvailable: 1, category: 1 });
+productSchema.index({ isAvailable: 1, isFeatured: 1 });
+productSchema.index({ isAvailable: 1, milkType: 1 });
+productSchema.index({ isAvailable: 1, price: 1 });
+productSchema.index({ category: 1, isAvailable: 1, price: 1 });
+
+// Text search index
+productSchema.index({ 
+  name: 'text', 
+  description: 'text', 
+  tags: 'text' 
+});
+
+// Unique compound index for barcode search
+productSchema.index({ 
+  scannedBarcodeId: 1, 
+  barcodeId: 1 
+}, { 
+  sparse: true 
+});
+
+// =============================================
+// PRE-SAVE MIDDLEWARE
+// =============================================
+
+// Validate barcode uniqueness before saving
+productSchema.pre('save', async function(next) {
+  if (this.isModified('scannedBarcodeId') && this.scannedBarcodeId) {
+    // Check if scanned barcode is already assigned to another product
+    const existingWithScannedBarcode = await mongoose.model('Product').findOne({
+      scannedBarcodeId: this.scannedBarcodeId,
+      _id: { $ne: this._id }
+    });
+    
+    if (existingWithScannedBarcode) {
+      return next(new Error(`Scanned barcode "${this.scannedBarcodeId}" is already assigned to product: ${existingWithScannedBarcode.name}`));
+    }
+    
+    // Check if scanned barcode conflicts with any generated barcode
+    const existingWithGeneratedBarcode = await mongoose.model('Product').findOne({
+      barcodeId: this.scannedBarcodeId,
+      _id: { $ne: this._id }
+    });
+    
+    if (existingWithGeneratedBarcode) {
+      return next(new Error(`Scanned barcode "${this.scannedBarcodeId}" conflicts with generated barcode of product: ${existingWithGeneratedBarcode.name}`));
+    }
+  }
+  
+  if (this.isModified('barcodeId') && this.barcodeId) {
+    // Check if generated barcode is already assigned to another product
+    const existingWithGeneratedBarcode = await mongoose.model('Product').findOne({
+      barcodeId: this.barcodeId,
+      _id: { $ne: this._id }
+    });
+    
+    if (existingWithGeneratedBarcode) {
+      return next(new Error(`Generated barcode "${this.barcodeId}" is already assigned to product: ${existingWithGeneratedBarcode.name}`));
+    }
+    
+    // Check if generated barcode conflicts with any scanned barcode
+    const existingWithScannedBarcode = await mongoose.model('Product').findOne({
+      scannedBarcodeId: this.barcodeId,
+      _id: { $ne: this._id }
+    });
+    
+    if (existingWithScannedBarcode) {
+      return next(new Error(`Generated barcode "${this.barcodeId}" conflicts with scanned barcode of product: ${existingWithScannedBarcode.name}`));
+    }
+  }
+  
+  next();
+});
+
+// Format nutritional info before saving
+productSchema.pre('save', function(next) {
+  if (this.nutritionalInfo) {
+    const nutrition = this.nutritionalInfo;
+    ['fat', 'protein', 'calories', 'carbohydrates'].forEach(key => {
+      if (nutrition[key] && typeof nutrition[key] === 'string') {
+        // Remove any non-numeric characters except decimal point
+        nutrition[key] = nutrition[key].replace(/[^\d.]/g, '');
+      }
+    });
+  }
+  next();
+});
+
+// =============================================
+// STATIC METHODS
+// =============================================
+
+// Find product by any barcode (scanned takes priority)
+productSchema.statics.findByBarcode = function(barcodeId) {
+  return this.findOne({
+    $and: [
+      { isAvailable: true },
+      {
+        $or: [
+          { scannedBarcodeId: barcodeId },
+          { barcodeId: barcodeId }
+        ]
+      }
+    ]
+  }).populate('category', 'name');
+};
+
+// Find products with barcode status
+productSchema.statics.findByBarcodeStatus = function(status) {
+  let filter = { isAvailable: true };
+  
+  switch (status) {
+    case 'with-barcode':
+      filter.$or = [
+        { scannedBarcodeId: { $exists: true, $ne: null } },
+        { barcodeId: { $exists: true, $ne: null } }
+      ];
+      break;
+    case 'scanned-only':
+      filter.scannedBarcodeId = { $exists: true, $ne: null };
+      break;
+    case 'generated-only':
+      filter.barcodeId = { $exists: true, $ne: null };
+      break;
+    case 'without-barcode':
+      filter.scannedBarcodeId = null;
+      filter.barcodeId = null;
+      break;
+    default:
+      break;
+  }
+  
+  return this.find(filter).populate('category', 'name');
+};
+
+// Get barcode statistics
+productSchema.statics.getBarcodeStats = function() {
+  return Promise.all([
+    this.countDocuments({ isAvailable: true }),
+    this.countDocuments({ 
+      isAvailable: true, 
+      scannedBarcodeId: { $exists: true, $ne: null } 
+    }),
+    this.countDocuments({ 
+      isAvailable: true, 
+      barcodeId: { $exists: true, $ne: null } 
+    }),
+    this.countDocuments({
+      isAvailable: true,
+      $or: [
+        { scannedBarcodeId: { $exists: true, $ne: null } },
+        { barcodeId: { $exists: true, $ne: null } }
+      ]
+    })
+  ]).then(([total, scanned, generated, withBarcode]) => ({
+    totalProducts: total,
+    withScannedBarcode: scanned,
+    withGeneratedBarcode: generated,
+    withAnyBarcode: withBarcode,
+    withoutBarcode: total - withBarcode
+  }));
+};
+
+// =============================================
+// INSTANCE METHODS
+// =============================================
+
+// Check if barcode can be assigned
+productSchema.methods.canAssignScannedBarcode = async function(barcodeId) {
+  if (!barcodeId) return false;
+  
+  const conflicts = await mongoose.model('Product').findOne({
+    $or: [
+      { scannedBarcodeId: barcodeId, _id: { $ne: this._id } },
+      { barcodeId: barcodeId, _id: { $ne: this._id } }
+    ]
+  });
+  
+  return !conflicts;
+};
+
+// Get barcode assignment info
+productSchema.methods.getBarcodeAssignmentInfo = async function(barcodeId) {
+  const conflicts = await mongoose.model('Product').findOne({
+    $or: [
+      { scannedBarcodeId: barcodeId, _id: { $ne: this._id } },
+      { barcodeId: barcodeId, _id: { $ne: this._id } }
+    ]
+  });
+  
+  return {
+    canAssign: !conflicts,
+    conflict: conflicts ? {
+      productId: conflicts._id,
+      productName: conflicts.name,
+      barcodeType: conflicts.scannedBarcodeId === barcodeId ? 'scanned' : 'generated'
+    } : null
+  };
+};
+
+// Clear all barcode data
+productSchema.methods.clearBarcodes = function() {
+  this.scannedBarcodeId = null;
+  this.barcodeId = null;
+  this.barcodeUrl = null;
+  this.barcodeData = null;
+  return this.save();
+};
+
+// Set scanned barcode with validation
+productSchema.methods.setScannedBarcode = async function(barcodeId) {
+  const assignmentInfo = await this.getBarcodeAssignmentInfo(barcodeId);
+  
+  if (!assignmentInfo.canAssign) {
+    throw new Error(`Cannot assign barcode "${barcodeId}". ${assignmentInfo.conflict ? `Already assigned to ${assignmentInfo.conflict.productName}` : 'Invalid barcode'}`);
+  }
+  
+  this.scannedBarcodeId = barcodeId;
+  return this.save();
+};
+
+// =============================================
+// QUERY HELPERS
+// =============================================
+
+// Query helper for available products
+productSchema.query.available = function() {
+  return this.where({ isAvailable: true });
+};
+
+// Query helper for featured products
+productSchema.query.featured = function() {
+  return this.where({ isFeatured: true, isAvailable: true });
+};
+
+// Query helper for products in stock
+productSchema.query.inStock = function() {
+  return this.where({ stock: { $gt: 0 }, isAvailable: true });
+};
+
+// Query helper for products on sale
+productSchema.query.onSale = function() {
+  return this.where({ discount: { $gt: 0 }, isAvailable: true });
+};
+
+// Query helper for products by category
+productSchema.query.byCategory = function(categoryId) {
+  return this.where({ category: categoryId, isAvailable: true });
+};
+
+// Query helper for products by milk type
+productSchema.query.byMilkType = function(milkType) {
+  return this.where({ milkType: milkType, isAvailable: true });
+};
+
+// =============================================
+// SCHEMA OPTIONS
+// =============================================
+
 // Convert to JSON with virtuals
 productSchema.set('toJSON', {
+  virtuals: true,
+  transform: function(doc, ret) {
+    // Remove internal fields from JSON output
+    delete ret.imagePublicId;
+    delete ret.__v;
+    return ret;
+  }
+});
+
+// Convert to Object with virtuals
+productSchema.set('toObject', {
   virtuals: true
 });
 
 const Product = mongoose.model('Product', productSchema);
+
 export default Product;

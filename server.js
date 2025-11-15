@@ -1,20 +1,20 @@
 // server.js - SIMPLIFIED VERSION
-import express from 'express';
-import dotenv from 'dotenv';
 import cors from 'cors';
+import dotenv from 'dotenv';
+import express from 'express';
 import connectDB from './config/db.js';
 import { productionConfig } from './config/production.js';
 
 // Import routes
-import authRoutes from './routes/auth.routes.js';
-import customerRoutes from './routes/customer.routes.js';
-import categoryRoutes from './routes/category.routes.js';
-import productRoutes from './routes/product.routes.js';
-import orderRoutes from './routes/order.routes.js';
-import retailerOrderRoutes from './routes/retailer.order.routes.js';
-import paymentRoutes from './routes/payment.routes.js';
 import adminRoutes from './routes/admin.routes.js';
+import authRoutes from './routes/auth.routes.js';
+import categoryRoutes from './routes/category.routes.js';
+import customerRoutes from './routes/customer.routes.js';
 import locationRoutes from './routes/location.routes.js';
+import orderRoutes from './routes/order.routes.js';
+import paymentRoutes from './routes/payment.routes.js';
+import productRoutes from './routes/product.routes.js';
+import retailerOrderRoutes from './routes/retailer.order.routes.js';
 
 // Import inventory routes (NEW)
 import inventoryRoutes from './routes/inventory.routes.js';
@@ -35,8 +35,8 @@ connectDB();
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/customer', customerRoutes);
-app.use('/api/catalog', categoryRoutes);
-app.use('/api/catalog', productRoutes);
+app.use('/api/catalog/categories', categoryRoutes);
+app.use('/api/catalog/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/orders/retailer', retailerOrderRoutes);
 app.use('/api/payments', paymentRoutes);

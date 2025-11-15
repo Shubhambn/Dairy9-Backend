@@ -1,5 +1,3 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\product.routes.js
-
 import express from 'express';
 import {
   createProduct,
@@ -11,73 +9,90 @@ import {
   searchProducts,
   uploadProductImages,
   deleteProductImage,
-  // Add the new barcode functions
+  // Enhanced barcode functions
   scanAndAssignBarcode,
-  updateProductBarcode,
-  removeProductBarcode,
+  generateProductBarcode,
+  removeScannedBarcode,
+  deleteGeneratedBarcode,
   getProductByBarcode,
-  scanBarcode
+  scanBarcode,
+  getProductBarcodeInfo,
+  getProductsBarcodeStatus,
+  createProductFromBarcode,
+  scanBarcodeForProductData,
+  createProductFromScanData,
+  // NEW: Critical missing functions for offline orders
+  getProductByAnyBarcode,
+  searchProductByBarcode,
+  // Legacy barcode functions
+  updateProductBarcode,
+  removeProductBarcode
 } from '../controllers/product.controller.js';
 import auth from '../middlewares/auth.js';
+import adminAuth from '../middlewares/adminAuth.js';
 import upload from '../middlewares/upload.js';
-import { generateProductQR,scanProductQR  } from '../controllers/product.controller.js';
-import { testCloudinaryConnection } from '../utils/cloudinaryUpload.js'; // adjust path if needed
-
 
 const router = express.Router();
 
-// Public routes
-router.get('/products', getAllProducts);
-router.get('/products/featured', getFeaturedProducts);
-router.get('/products/search', searchProducts);
-router.get('/products/:id', getProductById);
+// =============================================
+// PUBLIC ROUTES (Static routes first)
+// =============================================
+router.get('/', getAllProducts);
+router.get('/featured', getFeaturedProducts);
+router.get('/search', searchProducts);
 
-// Protected routes (Admin) with file upload
-router.post('/products', auth, upload.single('image'), createProduct);
-router.put('/products/:id', auth, upload.single('image'), updateProduct);
-router.delete('/products/:id', auth, deleteProduct);
+// 🎯 CRITICAL FIX: Unified barcode lookup endpoint for offline orders
+router.get('/barcode/:barcodeId', getProductByAnyBarcode); // CHANGED: Unified endpoint
+router.get('/barcode-lookup/:barcodeId', getProductByBarcode); // ADDED: Alternative endpoint
 
-// Image management routes
-router.post('/products/:id/images', auth, upload.array('images', 5), uploadProductImages);
-router.delete('/products/:id/images/:imageId', auth, deleteProductImage);
+// 🎯 ENHANCED: Public barcode scanning for offline orders
+router.post('/scan', scanBarcode);
+router.post('/scan-public', scanBarcode); // ADDED: Public scanning alias
 
-// Generate QR for a product
-router.post("/generate/:id", generateProductQR);
+// =============================================
+// PROTECTED ADMIN ROUTES (Static routes first)
+// =============================================
+router.get('/barcode/status', auth, adminAuth, getProductsBarcodeStatus);
 
-// Scan and get product info
-router.post("/scan", scanProductQR);
+// 🎯 ENHANCED BARCODE SCANNING ROUTES
+router.post('/scan-barcode', auth, adminAuth, scanBarcodeForProductData);
+router.post('/scan-create', auth, adminAuth, createProductFromBarcode);
+router.post('/create-from-scan', auth, adminAuth, createProductFromScanData);
 
+// =============================================
+// PARAMETERIZED ROUTES (After static routes)
+// =============================================
+router.get('/:id', getProductById);
+router.get('/:id/barcode-info', getProductBarcodeInfo);
 
-// Barcode Routes
-router.post('/:id/barcode', scanAndAssignBarcode);
-router.put('/:id/barcode', updateProductBarcode);
-router.delete('/:id/barcode', removeProductBarcode);
-router.get('/barcode/:barcodeId', getProductByBarcode);
-router.post('/scan-barcode', scanBarcode);
+// 🎯 CRITICAL ADDITION: Direct product lookup by ID (for generated barcodes)
+router.get('/id/:productId', getProductById); // ADDED: Alternative ID endpoint
 
-// Add this to your routes for testing
-router.get('/test-cloudinary', async (req, res) => {
-  try {
-    const cloudinaryConnected = await testCloudinaryConnection();
-    if (cloudinaryConnected) {
-      res.json({ 
-        success: true, 
-        message: 'Cloudinary is properly configured' 
-      });
-    } else {
-      res.status(503).json({ 
-        success: false, 
-        message: 'Cloudinary configuration issue' 
-      });
-    }
-  } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: 'Cloudinary test failed',
-      error: error.message 
-    });
-  }
-});
+// Product CRUD operations
+router.post('/', auth, adminAuth, upload.fields([
+  { name: 'image', maxCount: 1 },
+  { name: 'additionalImages', maxCount: 10 }
+]), createProduct);
 
+router.put('/:id', auth, adminAuth, upload.fields([
+  { name: 'image', maxCount: 1 },
+  { name: 'additionalImages', maxCount: 10 }
+]), updateProduct);
+
+router.delete('/:id', auth, adminAuth, deleteProduct);
+
+// Product images
+router.post('/:id/images', auth, adminAuth, upload.array('images', 10), uploadProductImages);
+router.delete('/:id/images/:imageId', auth, adminAuth, deleteProductImage);
+
+// 🎯 ENHANCED BARCODE MANAGEMENT ROUTES
+router.post('/:id/generate-barcode', auth, adminAuth, generateProductBarcode);
+router.post('/:id/scan-barcode', auth, adminAuth, scanAndAssignBarcode);
+router.delete('/:id/scanned-barcode', auth, adminAuth, removeScannedBarcode);
+router.delete('/:id/generated-barcode', auth, adminAuth, deleteGeneratedBarcode);
+
+// 🎯 LEGACY BARCODE ROUTES (for backward compatibility)
+router.put('/:id/barcode', auth, adminAuth, updateProductBarcode);
+router.delete('/:id/barcode', auth, adminAuth, removeProductBarcode);
 
 export default router;

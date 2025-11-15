@@ -980,12 +980,197 @@ export const getRetailerActiveOrders = async (req, res) => {
   }
 };
 
+// @desc    Create offline order (from QR scanning)
+// @route   POST /api/orders/offline
+// @access  Private/Retailer
+export const createOfflineOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const retailerId = req.user._id;
+    const {
+      items,
+      paymentMethod,
+      specialInstructions,
+      customerName,
+      customerPhone
+    } = req.body;
+
+    // Verify retailer exists and is active
+    const retailer = await Admin.findOne({ user: retailerId, isActive: true });
+    if (!retailer) {
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: 'Retailer profile not found or inactive'
+      });
+    }
+
+    // Validate items and calculate total
+    let totalAmount = 0;
+    const orderItems = [];
+
+    for (const item of items) {
+      const product = await Product.findById(item.productId);
+      if (!product) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Product not found: ${item.productId}`
+        });
+      }
+
+      if (!product.isAvailable) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Product not available: ${product.name}`
+        });
+      }
+
+      const itemTotal = product.price * item.quantity;
+      totalAmount += itemTotal;
+
+      orderItems.push({
+        product: product._id,
+        quantity: item.quantity,
+        price: product.price,
+        unit: product.unit,
+        reservedQuantity: 0,
+        isReserved: false
+      });
+    }
+
+    // Check retailer inventory availability
+    const stockCheck = await inventoryService.checkStockAvailability(retailer._id, items);
+    if (!stockCheck.allAvailable) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Some items are out of stock',
+        stockDetails: stockCheck.items
+      });
+    }
+
+    // Create offline order
+    const order = new Order({
+      orderId: generateOrderId(),
+      items: orderItems,
+      totalAmount,
+      finalAmount: totalAmount,
+      paymentMethod: paymentMethod || 'cash',
+      paymentStatus: 'paid', // Offline orders are paid immediately
+      specialInstructions,
+      orderType: 'offline',
+      processedBy: retailer._id,
+      assignedRetailer: retailer._id,
+      assignmentDetails: {
+        assignedAt: new Date(),
+        distance: 0,
+        retailerName: retailer.fullName,
+        retailerShop: retailer.shopName,
+        serviceRadius: retailer.serviceRadius
+      },
+      reservationStatus: 'not_reserved',
+      orderStatus: 'delivered', // Offline orders are completed immediately
+      deliveryDate: new Date(),
+      customerName,
+      customerPhone
+    });
+
+    await order.save({ session });
+
+    // Reserve stock for offline order
+    try {
+      const reservationResult = await inventoryService.reserveStockForOrder(
+        order._id,
+        retailer._id,
+        items,
+        req.user._id
+      );
+
+      // Update order with reservation status
+      order.reservationStatus = 'reserved';
+      order.reservationDate = new Date();
+
+      // Update order items with reservation info
+      order.items.forEach((item, index) => {
+        item.reservedQuantity = items[index].quantity;
+        item.isReserved = true;
+      });
+
+      await order.save({ session });
+
+      // Immediately mark as delivered and deduct stock
+      const deliveryResult = await inventoryService.confirmOrderDelivery(
+        order._id,
+        retailer._id,
+        req.user._id
+      );
+
+      order.reservationStatus = 'delivered';
+      order.deliveredAt = new Date();
+      await order.save({ session });
+
+      await session.commitTransaction();
+
+      // Populate order for response
+      await order.populate('items.product', 'name image unit');
+
+      res.status(201).json({
+        success: true,
+        message: 'Offline order created and completed successfully',
+        order: {
+          _id: order._id,
+          orderId: order.orderId,
+          totalAmount: order.totalAmount,
+          finalAmount: order.finalAmount,
+          orderStatus: order.orderStatus,
+          reservationStatus: order.reservationStatus,
+          orderType: order.orderType,
+          items: order.items,
+          customerName: order.customerName,
+          customerPhone: order.customerPhone,
+          processedBy: {
+            retailerName: retailer.fullName,
+            shopName: retailer.shopName
+          }
+        }
+      });
+
+    } catch (reservationError) {
+      await Order.findByIdAndDelete(order._id).session(session);
+      await session.abortTransaction();
+
+      console.error('Stock reservation failed:', reservationError);
+
+      res.status(400).json({
+        success: false,
+        message: 'Order creation failed: Could not reserve stock. ' + reservationError.message
+      });
+    }
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Create Offline Order Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while creating offline order',
+      error: error.message
+    });
+  } finally {
+    session.endSession();
+  }
+};
+
 export const getRetailerOrderHistory = async (req, res) => {
   try {
     const userId = req.user._id;
-    const { page = 1, limit = 10, status } = req.query;
+    const { page = 1, limit = 10, status, type } = req.query;
 
-    console.log('Retailer order history request:', { retailerId: userId, status, page, limit });
+    console.log('Retailer order history request:', { retailerId: userId, status, page, limit, type });
 
     // Verify retailer exists
     const retailer = await Admin.findOne({ user: userId });
@@ -998,10 +1183,15 @@ export const getRetailerOrderHistory = async (req, res) => {
 
     // For order history, show ALL assigned orders regardless of status
     const filter = { assignedRetailer: retailer._id };
-    
+
     // Additional status filter if provided
     if (status && status !== 'all') {
       filter.orderStatus = status;
+    }
+
+    // Filter by order type if provided
+    if (type && type !== 'all') {
+      filter.orderType = type;
     }
 
     console.log('Order history filter:', filter);
