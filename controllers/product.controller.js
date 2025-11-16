@@ -17,7 +17,6 @@ import openFoodFactsService from '../services/openFoodFacts.service.js';
 // @route   POST /api/catalog/products
 // @access  Private (Admin)
 export const createProduct = async (req, res) => {
-  // 0️⃣ Test Cloudinary connection
   const cloudinaryConnected = await testCloudinaryConnection();
   if (!cloudinaryConnected) {
     return res.status(503).json({
@@ -30,8 +29,8 @@ export const createProduct = async (req, res) => {
     const { 
       name, description, price, category, unit, unitSize, stock, 
       milkType, nutritionalInfo, tags, discount, isFeatured,
-      generateBarcode: shouldGenerateBarcode = false,
-      scannedBarcodeId // NEW: Support scanned barcode during creation
+      scannedBarcodeId,
+      cloudinaryImages // 🎯 NEW: Accept pre-uploaded Cloudinary images
     } = req.body;
 
     // 1️⃣ Validate required fields
@@ -51,7 +50,7 @@ export const createProduct = async (req, res) => {
       });
     }
 
-    // 3️⃣ Check duplicate product name
+    // 3️⃣ Check duplicate name
     const existingProduct = await Product.findOne({ 
       name: { $regex: new RegExp(`^${name}$`, 'i') } 
     });
@@ -62,7 +61,7 @@ export const createProduct = async (req, res) => {
       });
     }
 
-    // 4️⃣ Check if scanned barcode is already used
+    // 4️⃣ Check duplicate barcode
     if (scannedBarcodeId) {
       const existingBarcode = await Product.findOne({
         $or: [
@@ -74,7 +73,7 @@ export const createProduct = async (req, res) => {
       if (existingBarcode) {
         return res.status(400).json({
           success: false,
-          message: 'This scanned barcode is already assigned to another product',
+          message: 'This barcode is already assigned to another product',
           existingProduct: {
             id: existingBarcode._id,
             name: existingBarcode.name
@@ -83,50 +82,71 @@ export const createProduct = async (req, res) => {
       }
     }
 
-    // 5️⃣ Upload main image
+    // 5️⃣ 🎯 FIX: Handle images from multiple sources
     let imageUrl = '/images/default-product.jpg';
     let imagePublicId = null;
-    if (req.file) {
+    let additionalImages = [];
+
+    // Priority 1: Use Cloudinary images from barcode scan
+    if (cloudinaryImages && Array.isArray(cloudinaryImages) && cloudinaryImages.length > 0) {
+      console.log('📸 Using pre-uploaded Cloudinary images:', cloudinaryImages.length);
+      
+      // First image as main
+      const mainImage = cloudinaryImages[0];
+      imageUrl = mainImage.url;
+      imagePublicId = mainImage.publicId;
+      
+      // Rest as additional
+      additionalImages = cloudinaryImages.slice(1).map(img => ({
+        url: img.url,
+        publicId: img.publicId
+      }));
+      
+      console.log('✅ Main image:', imageUrl);
+      console.log('✅ Additional images:', additionalImages.length);
+    }
+    // Priority 2: Upload from FormData if no Cloudinary images
+    else if (req.file) {
       try {
         const uploadResult = await uploadToCloudinary(req.file.buffer, 'dairy9/products');
         imageUrl = uploadResult.secure_url;
         imagePublicId = uploadResult.public_id;
+        console.log('✅ Uploaded main image from FormData');
       } catch (uploadError) {
-        console.error('Image upload failed, using default:', uploadError.message);
+        console.error('Image upload failed:', uploadError.message);
       }
     }
 
-    // 6️⃣ Handle additional images
-    let additionalImages = [];
+    // Handle additional FormData images
     if (req.files && req.files.length > 1) {
       try {
-        // Skip first file (main image) and process additional images
         const additionalFiles = req.files.slice(1);
         const uploadResults = await uploadMultipleToCloudinary(
           additionalFiles, 
           'dairy9/products/additional'
         );
         
-        additionalImages = uploadResults.map(img => ({
+        const formDataAdditionalImages = uploadResults.map(img => ({
           url: img.secure_url,
           publicId: img.public_id
         }));
+        
+        additionalImages = [...additionalImages, ...formDataAdditionalImages];
       } catch (uploadError) {
         console.error('Additional images upload failed:', uploadError.message);
       }
     }
 
-    // 7️⃣ Format tags
+    // 6️⃣ Format data
     const formattedTags = typeof tags === 'string' 
       ? tags.split(',').map(tag => tag.trim()).filter(tag => tag)
       : (Array.isArray(tags) ? tags : []);
 
-    // 8️⃣ Format nutritional info
     const formattedNutritionalInfo = typeof nutritionalInfo === 'string' 
       ? JSON.parse(nutritionalInfo) 
       : (nutritionalInfo || {});
 
-    // 9️⃣ Create product
+    // 7️⃣ Create product
     const product = new Product({
       name,
       description: description || '',
@@ -144,7 +164,6 @@ export const createProduct = async (req, res) => {
       discount: Number(discount) || 0,
       isFeatured: isFeatured === 'true' || isFeatured === true,
       isAvailable: true,
-      // Initialize barcode fields
       barcodeId: null,
       barcodeUrl: null,
       scannedBarcodeId: scannedBarcodeId?.trim() || null
@@ -153,24 +172,13 @@ export const createProduct = async (req, res) => {
     await product.save();
     await product.populate('category', 'name');
 
-    // 🔟 Generate barcode only if requested
-    if (shouldGenerateBarcode === 'true' || shouldGenerateBarcode === true) {
-      try {
-        await generateAndAssignBarcode(product);
-      } catch (barcodeError) {
-        console.error('Barcode generation failed:', barcodeError.message);
-        // Continue without barcode
-      }
-    }
-
-    // 1️⃣1️⃣ Fetch final product
     const finalProduct = await Product.findById(product._id).populate('category', 'name');
+
+    console.log('✅ Product created successfully with', additionalImages.length + 1, 'images');
 
     res.status(201).json({
       success: true,
-      message: finalProduct.barcodeUrl
-        ? '✅ Product created successfully with barcode'
-        : '✅ Product created successfully',
+      message: '✅ Product created successfully',
       product: finalProduct
     });
 
@@ -1669,11 +1677,6 @@ export const createProductFromBarcode = async (req, res) => {
   }
 };
 
-// In product.controller.js - Update scanBarcodeForProductData
-
-// @desc    Scan barcode and get product data (NO AUTO-CREATION)
-// @route   POST /api/catalog/products/scan-barcode
-// @access  Private (Admin)
 export const scanBarcodeForProductData = async (req, res) => {
   try {
     const { barcode } = req.body;
@@ -1690,7 +1693,7 @@ export const scanBarcodeForProductData = async (req, res) => {
       });
     }
 
-    // 2️⃣ Check if barcode already exists in system (FAST CHECK)
+    // 2️⃣ Check if barcode already exists
     const existingProduct = await Product.findOne({
       $and: [
         { isAvailable: true },
@@ -1721,34 +1724,32 @@ export const scanBarcodeForProductData = async (req, res) => {
       });
     }
 
-    // 3️⃣ Fetch all categories for matching
+    // 3️⃣ Fetch all categories
     const allCategories = await Category.find({ isActive: true }).select('name _id');
-    console.log('📋 Available categories:', allCategories.length);
 
-    // 4️⃣ 🎯 PERFORMANCE FIX: Process OpenFoodFacts data WITHOUT waiting for image downloads
+    // 4️⃣ Fetch from OpenFoodFacts
     let openFoodFactsData = null;
+    let downloadedImages = [];
     
     try {
       console.log('🔍 Fetching from OpenFoodFacts...');
       openFoodFactsData = await openFoodFactsService.getProductByBarcode(barcode);
-      console.log('📊 OpenFoodFacts response:', {
-        found: openFoodFactsData.found,
-        name: openFoodFactsData.name,
-        categories: openFoodFactsData.categories?.length
-      });
-
-      // 🎯 DON'T download images during scan - let frontend handle this
-      // Images will be downloaded only when user confirms creation
+      
+      // 🎯 FIX: Download images immediately during scan
+      if (openFoodFactsData?.found && openFoodFactsData.images.length > 0) {
+        console.log('📸 Downloading product images immediately...');
+        downloadedImages = await openFoodFactsService.downloadAndUploadImages(
+          openFoodFactsData.images.slice(0, 3)
+        );
+        console.log(`✅ Downloaded ${downloadedImages.length} images to Cloudinary`);
+      }
 
     } catch (apiError) {
       console.warn('⚠️ OpenFoodFacts API error:', apiError.message);
-      openFoodFactsData = { 
-        found: false,
-        error: apiError.message 
-      };
+      openFoodFactsData = { found: false };
     }
 
-    // 5️⃣ Prepare suggested product data (FAST - no image processing)
+    // 5️⃣ Prepare suggested data
     let suggestedData = {
       name: '',
       description: '',
@@ -1775,30 +1776,29 @@ export const scanBarcodeForProductData = async (req, res) => {
       milkType: false,
       tags: false,
       nutritionalInfo: false,
-      images: false // 🎯 Set to false initially
+      images: downloadedImages.length > 0
     };
 
     // 6️⃣ Fill data from OpenFoodFacts if available
     if (openFoodFactsData?.found) {
-      // Extract unit and size
-      const { unit: extractedUnit, unitSize: extractedUnitSize } = openFoodFactsService.extractUnitAndSize(openFoodFactsData.quantity);
+      const { unit: extractedUnit, unitSize: extractedUnitSize } = 
+        openFoodFactsService.extractUnitAndSize(openFoodFactsData.quantity);
       
-      // Extract milk type
       const extractedMilkType = openFoodFactsService.extractMilkType(openFoodFactsData.rawData);
       
-      // Find matching category
       let matchedCategoryId = null;
       if (openFoodFactsData.categories && openFoodFactsData.categories.length > 0) {
-        matchedCategoryId = openFoodFactsService.findMatchingCategory(openFoodFactsData.categories, allCategories);
+        matchedCategoryId = openFoodFactsService.findMatchingCategory(
+          openFoodFactsData.categories, 
+          allCategories
+        );
       }
 
-      // Prepare tags
       const autoTags = [];
       if (openFoodFactsData.brand) autoTags.push(openFoodFactsData.brand);
       if (openFoodFactsData.labels) autoTags.push(...openFoodFactsData.labels.slice(0, 3));
       if (openFoodFactsData.categories) autoTags.push(...openFoodFactsData.categories.slice(0, 2));
 
-      // Update suggested data
       suggestedData = {
         ...suggestedData,
         name: openFoodFactsData.name || `Product ${barcode}`,
@@ -1811,7 +1811,6 @@ export const scanBarcodeForProductData = async (req, res) => {
         tags: autoTags.join(', ')
       };
 
-      // Update auto-filled fields
       autoFilledFields.name = !!openFoodFactsData.name;
       autoFilledFields.description = !!openFoodFactsData.description;
       autoFilledFields.category = !!matchedCategoryId;
@@ -1819,29 +1818,22 @@ export const scanBarcodeForProductData = async (req, res) => {
       autoFilledFields.unitSize = true;
       autoFilledFields.milkType = true;
       autoFilledFields.tags = autoTags.length > 0;
-      autoFilledFields.nutritionalInfo = !!(openFoodFactsData.nutritionalInfo && Object.keys(openFoodFactsData.nutritionalInfo).length > 0);
-      // 🎯 images remains false - we'll download on confirmation
+      autoFilledFields.nutritionalInfo = !!(openFoodFactsData.nutritionalInfo && 
+        Object.keys(openFoodFactsData.nutritionalInfo).length > 0);
     } else {
-      // No data from OpenFoodFacts - create basic product
       suggestedData.name = `Product ${barcode}`;
       autoFilledFields.name = true;
     }
 
-    // 7️⃣ Determine missing required fields
+    // 7️⃣ Determine missing fields
     const missingRequiredFields = {
       name: !suggestedData.name.trim(),
-      price: suggestedData.price === 0 || suggestedData.price === '',
+      price: suggestedData.price === 0,
       category: !suggestedData.category,
       unit: !suggestedData.unit
     };
 
-    // 8️⃣ 🎯 Include image URLs but don't download them yet
-    const imageInfo = openFoodFactsData?.found ? {
-      imageUrls: openFoodFactsData.images || [], // Original URLs for frontend preview
-      needsDownload: true // Frontend knows to download on confirmation
-    } : null;
-
-    // 9️⃣ Prepare response
+    // 8️⃣ 🎯 FIX: Include downloaded Cloudinary images directly
     const response = {
       success: true,
       message: openFoodFactsData?.found 
@@ -1849,33 +1841,35 @@ export const scanBarcodeForProductData = async (req, res) => {
         : 'No product data found online. Please fill in the product details manually.',
       dataSource: openFoodFactsData?.found ? 'openfoodfacts' : 'manual',
       scannedBarcode: barcode.trim(),
-      productData: {
-        ...suggestedData,
-        // 🎯 Don't include downloaded images yet
-        images: [] // Empty array - images will be downloaded on confirmation
-      },
-      openFoodFactsInfo: {
+      openFoodFactsData: {
         found: openFoodFactsData?.found || false,
-        productName: openFoodFactsData?.name,
-        brand: openFoodFactsData?.brand,
+        barcode: barcode,
+        name: suggestedData.name,
+        description: suggestedData.description,
+        brand: openFoodFactsData?.brand || '',
         categories: openFoodFactsData?.categories || [],
-        quantity: openFoodFactsData?.quantity,
-        imagesCount: openFoodFactsData?.images?.length || 0,
-        imageUrls: openFoodFactsData?.images || [] // For frontend preview
+        quantity: openFoodFactsData?.quantity || '',
+        unit: suggestedData.unit,
+        unitSize: suggestedData.unitSize,
+        nutritionalInfo: suggestedData.nutritionalInfo
       },
-      imageInfo: imageInfo, // Let frontend handle image download
+      suggestedData: suggestedData,
+      // 🎯 FIX: Send downloaded Cloudinary images directly
+      imageInfo: {
+        totalDownloaded: downloadedImages.length,
+        images: downloadedImages // Already uploaded to Cloudinary
+      },
       autoFilledFields,
       missingRequiredFields,
-      requiresUserInput: true,
-      availableCategories: allCategories
+      requiresConfirmation: true,
+      availableCategories: allCategories.map(cat => ({ _id: cat._id, name: cat.name }))
     };
 
-    console.log('✅ Returning product data to frontend (FAST)');
+    console.log('✅ Returning product data with', downloadedImages.length, 'images');
     res.status(200).json(response);
 
   } catch (error) {
     console.error('❌ Barcode Scan Error:', error);
-    
     res.status(500).json({
       success: false,
       message: 'Server error during barcode scanning',
@@ -2199,6 +2193,98 @@ export const searchProductByBarcode = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to search product by barcode',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Download and process images from URLs
+// @route   POST /api/catalog/products/download-images
+// @access  Private (Admin)
+export const downloadAndProcessImages = async (req, res) => {
+  try {
+    const { imageUrls, barcode } = req.body;
+
+    console.log('🖼️ Downloading images for barcode:', barcode);
+    console.log('📸 Original Image URLs:', imageUrls?.length || 0);
+
+    if (!imageUrls || !Array.isArray(imageUrls) || imageUrls.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No image URLs provided'
+      });
+    }
+
+    const downloadedImages = [];
+
+    // 🎯 FIX: Remove duplicate URLs before processing
+    const uniqueImageUrls = [...new Set(imageUrls.map(img => 
+      typeof img === 'string' ? img : img.url
+    ))];
+    
+    console.log('🎯 Unique Image URLs:', uniqueImageUrls.length);
+
+    // Process first 3 unique images maximum
+    const imagesToProcess = uniqueImageUrls.slice(0, 3);
+    
+    for (let i = 0; i < imagesToProcess.length; i++) {
+      const imageUrl = imagesToProcess[i];
+      try {
+        console.log(`📥 Downloading image ${i + 1}:`, imageUrl);
+        
+        // Download image
+        const response = await fetch(imageUrl);
+        if (!response.ok) {
+          console.warn(`⚠️ Failed to download image ${i + 1}`);
+          continue;
+        }
+
+        // Convert to buffer
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+
+        // Upload to Cloudinary
+        const uploadResult = await uploadToCloudinary(
+          buffer, 
+          `dairy9/products/scanned/${barcode}`
+        );
+
+        // 🎯 FIX: Preserve image type information
+        const originalImage = imageUrls.find(img => 
+          (typeof img === 'string' ? img : img.url) === imageUrl
+        );
+        
+        downloadedImages.push({
+          url: uploadResult.secure_url,
+          publicId: uploadResult.public_id,
+          originalUrl: imageUrl,
+          type: typeof originalImage === 'object' ? originalImage.type : 'unknown',
+          size: buffer.length,
+          index: i
+        });
+
+        console.log(`✅ Image ${i + 1} uploaded to Cloudinary, type:`, downloadedImages[i].type);
+
+      } catch (error) {
+        console.error(`❌ Error processing image ${i + 1}:`, error.message);
+        // Continue with other images
+      }
+    }
+
+    console.log(`🎉 Successfully processed ${downloadedImages.length} unique images`);
+
+    res.status(200).json({
+      success: true,
+      message: `Downloaded and processed ${downloadedImages.length} images`,
+      images: downloadedImages,
+      totalProcessed: downloadedImages.length
+    });
+
+  } catch (error) {
+    console.error('❌ Image Download Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to download and process images',
       error: error.message
     });
   }
