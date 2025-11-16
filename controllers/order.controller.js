@@ -21,14 +21,32 @@ const findOrderById = async (orderIdentifier) => {
   }
 };
 
-// @desc    Create new order WITH INVENTORY RESERVATION
+// Helper function to get retailer's inventory prices
+const getRetailerInventoryPrices = async (retailerId, authToken) => {
+  try {
+    const inventoryResponse = await fetch(`${process.env.EXPO_PUBLIC_API_URL}/api/retailer/inventory`, {
+      headers: { Authorization: authToken }
+    });
+    
+    if (inventoryResponse.ok) {
+      const inventoryData = await inventoryResponse.json();
+      return inventoryData.data?.inventory || [];
+    }
+    return [];
+  } catch (error) {
+    console.log('⚠️ Could not fetch retailer inventory:', error.message);
+    return [];
+  }
+};
+
+// @desc    Create new order WITH INVENTORY RESERVATION AND PRICE OVERRIDES
 // @route   POST /api/orders
 // @access  Private
 export const createOrder = async (req, res) => {
-  const session = await mongoose.startSession(); // 👈 ADD SESSION
+  const session = await mongoose.startSession();
   
   try {
-    session.startTransaction(); // 👈 START TRANSACTION
+    session.startTransaction();
 
     const userId = req.user._id;
     const { 
@@ -49,45 +67,7 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    // Validate items and calculate total
-    let totalAmount = 0;
-    const orderItems = [];
-
-    // 👇 REMOVE OLD STOCK CHECK - We'll check retailer inventory instead
-    for (const item of items) {
-      const product = await Product.findById(item.productId);
-      if (!product) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Product not found: ${item.productId}`
-        });
-      }
-
-      if (!product.isAvailable) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Product not available: ${product.name}`
-        });
-      }
-
-      // ✅ REMOVE: product.stock check - we'll check retailer inventory
-
-      const itemTotal = product.price * item.quantity;
-      totalAmount += itemTotal;
-
-      orderItems.push({
-        product: product._id,
-        quantity: item.quantity,
-        price: product.price,
-        unit: product.unit,
-        reservedQuantity: 0, // 👈 ADD RESERVATION TRACKING
-        isReserved: false    // 👈 ADD RESERVATION STATUS
-      });
-    }
-
-    // Find the closest retailer for order assignment
+    // Find the closest retailer for order assignment FIRST
     let assignedRetailer = null;
     let assignmentDetails = null;
     
@@ -112,55 +92,118 @@ export const createOrder = async (req, res) => {
         message: 'Delivery address coordinates are required. Please provide a valid address with location coordinates to place an order.',
         suggestion: 'Please update your delivery address with proper location coordinates or select your location on the map.'
       });
-    } else {
-      // Validate customer coordinates
-      if (!validateCoordinates(customerLocation.latitude, customerLocation.longitude)) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid delivery address coordinates'
-        });
-      }
-
-      // Get all active retailers
-      const retailers = await Admin.find({ isActive: true });
-      
-      if (retailers.length === 0) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: 'No active retailers available at the moment'
-        });
-      }
-
-      // Find the closest retailer within service radius
-      const closestRetailerInfo = getClosestRetailer(
-        customerLocation.latitude,
-        customerLocation.longitude,
-        retailers,
-        100 // 50km max radius
-      );
-      
-      if (closestRetailerInfo && closestRetailerInfo.retailer) {
-        assignedRetailer = closestRetailerInfo.retailer._id;
-        assignmentDetails = {
-          distance: closestRetailerInfo.distance,
-          retailerName: closestRetailerInfo.retailer.fullName,
-          retailerShop: closestRetailerInfo.retailer.shopName,
-          serviceRadius: closestRetailerInfo.retailer.serviceRadius
-        };
-        
-        console.log(`Order assigned to retailer: ${closestRetailerInfo.retailer.shopName} (${closestRetailerInfo.distance}km away)`);
-      } else {
-        await session.abortTransaction();
-        console.log('No retailer found within service radius');
-        return res.status(400).json({
-          success: false,
-          message: 'No retailer available within your delivery area. Please try a different address or contact customer support.',
-          suggestion: 'No active retailer found within the service radius for your delivery location.'
-        });
-      }
     }
+
+    // Validate customer coordinates
+    if (!validateCoordinates(customerLocation.latitude, customerLocation.longitude)) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid delivery address coordinates'
+      });
+    }
+
+    // Get all active retailers
+    const retailers = await Admin.find({ isActive: true });
+    
+    if (retailers.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'No active retailers available at the moment'
+      });
+    }
+
+    // Find the closest retailer within service radius
+    const closestRetailerInfo = getClosestRetailer(
+      customerLocation.latitude,
+      customerLocation.longitude,
+      retailers,
+      100 // 100km max radius
+    );
+    
+    if (closestRetailerInfo && closestRetailerInfo.retailer) {
+      assignedRetailer = closestRetailerInfo.retailer._id;
+      assignmentDetails = {
+        distance: closestRetailerInfo.distance,
+        retailerName: closestRetailerInfo.retailer.fullName,
+        retailerShop: closestRetailerInfo.retailer.shopName,
+        serviceRadius: closestRetailerInfo.retailer.serviceRadius
+      };
+      
+      console.log(`📍 Order assigned to retailer: ${closestRetailerInfo.retailer.shopName} (${closestRetailerInfo.distance}km away)`);
+    } else {
+      await session.abortTransaction();
+      console.log('❌ No retailer found within service radius');
+      return res.status(400).json({
+        success: false,
+        message: 'No retailer available within your delivery area. Please try a different address or contact customer support.',
+        suggestion: 'No active retailer found within the service radius for your delivery location.'
+      });
+    }
+
+    // 🔥 CRITICAL FIX: Get retailer's inventory prices BEFORE processing items
+    console.log('💰 Fetching retailer inventory prices for order...');
+    const inventoryItems = await getRetailerInventoryPrices(assignedRetailer, req.headers.authorization);
+    console.log(`📦 Retrieved ${inventoryItems.length} inventory items for retailer`);
+
+    // Process order items with retailer's overridden prices
+    let totalAmount = 0;
+    const orderItems = [];
+
+    for (const item of items) {
+      const product = await Product.findById(item.productId);
+      if (!product) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Product not found: ${item.productId}`
+        });
+      }
+
+      if (!product.isAvailable) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Product not available: ${product.name}`
+        });
+      }
+
+      // 🔥 USE RETAILER'S OVERRIDDEN PRICE
+      let finalPrice = product.price; // Default to catalog price
+      let isPriceOverridden = false;
+      
+      // Find this product in retailer's inventory
+      const inventoryItem = inventoryItems.find(inv => {
+        const inventoryProductId = inv.product?._id || inv.product;
+        return inventoryProductId && inventoryProductId.toString() === item.productId.toString();
+      });
+
+      if (inventoryItem && inventoryItem.sellingPrice) {
+        finalPrice = inventoryItem.sellingPrice;
+        isPriceOverridden = finalPrice !== product.price;
+        console.log(`💰 Price override for ${product.name}: ${product.price} → ${finalPrice} (Overridden: ${isPriceOverridden})`);
+      } else {
+        console.log(`💰 Using catalog price for ${product.name}: ${finalPrice}`);
+      }
+
+      const itemTotal = finalPrice * item.quantity;
+      totalAmount += itemTotal;
+
+      orderItems.push({
+        product: product._id,
+        quantity: item.quantity,
+        price: finalPrice, // 🔥 Use overridden price
+        originalPrice: product.price, // Store original price
+        isPriceOverridden: isPriceOverridden, // Track override
+        priceSource: isPriceOverridden ? 'retailer_inventory' : 'catalog',
+        unit: product.unit,
+        reservedQuantity: 0,
+        isReserved: false
+      });
+    }
+
+    console.log(`🧮 Order total calculated: ₹${totalAmount}`);
 
     // 👇 CHECK RETAILER INVENTORY AVAILABILITY
     const stockCheck = await inventoryService.checkStockAvailability(assignedRetailer, items);
@@ -168,7 +211,7 @@ export const createOrder = async (req, res) => {
       await session.abortTransaction();
       return res.status(400).json({
         success: false,
-        message: 'Some items are out of stock with the assigned retailer',
+        message: 'Currently Some Stocks are not Available at your Location, Try different Location',
         stockDetails: stockCheck.items,
         retailer: assignmentDetails.retailerShop
       });
@@ -188,8 +231,9 @@ export const createOrder = async (req, res) => {
       deliveryDate: new Date(Date.now() + 24 * 60 * 60 * 1000),
       assignedRetailer,
       assignmentDetails,
-      reservationStatus: 'not_reserved', // 👈 ADD RESERVATION STATUS
-      orderStatus: 'pending'
+      reservationStatus: 'not_reserved',
+      orderStatus: 'pending',
+      priceSource: orderItems.some(item => item.isPriceOverridden) ? 'retailer_inventory' : 'catalog'
     });
 
     await order.save({ session });
@@ -214,11 +258,13 @@ export const createOrder = async (req, res) => {
       });
 
       await order.save({ session });
-      await session.commitTransaction(); // 👈 COMMIT TRANSACTION
+      await session.commitTransaction();
 
       // Populate order for response
       await order.populate('items.product', 'name image unit');
       await order.populate('assignedRetailer', 'shopName fullName contactNumber');
+
+      console.log(`✅ Online order created successfully with price overrides`);
 
       res.status(201).json({
         success: true,
@@ -231,11 +277,20 @@ export const createOrder = async (req, res) => {
           orderStatus: order.orderStatus,
           reservationStatus: order.reservationStatus,
           assignedRetailer: order.assignedRetailer,
-          items: order.items,
-          reservationDetails: {
-            reservedItems: reservationResult.reservedItems.length,
-            message: reservationResult.message
-          }
+          items: order.items.map(item => ({
+            product: item.product,
+            quantity: item.quantity,
+            price: item.price,
+            originalPrice: item.originalPrice,
+            isPriceOverridden: item.isPriceOverridden,
+            priceSource: item.priceSource,
+            unit: item.unit
+          })),
+          priceSource: order.priceSource
+        },
+        reservationDetails: {
+          reservedItems: reservationResult.reservedItems.length,
+          message: reservationResult.message
         }
       });
 
@@ -244,7 +299,7 @@ export const createOrder = async (req, res) => {
       await Order.findByIdAndDelete(order._id).session(session);
       await session.abortTransaction();
       
-      console.error('Stock reservation failed:', reservationError);
+      console.error('❌ Stock reservation failed:', reservationError);
       
       res.status(400).json({
         success: false,
@@ -255,14 +310,355 @@ export const createOrder = async (req, res) => {
 
   } catch (error) {
     await session.abortTransaction();
-    console.error('Create Order Error:', error);
+    console.error('❌ Create Order Error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error while creating order',
       error: error.message
     });
   } finally {
-    session.endSession(); // 👈 END SESSION
+    session.endSession();
+  }
+};
+
+// @desc    Create offline order (from QR scanning) WITH PRICE OVERRIDES
+// @route   POST /api/orders/offline
+// @access  Private/Retailer
+export const createOfflineOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const retailerId = req.user._id;
+    const {
+      items,
+      paymentMethod,
+      specialInstructions,
+      customerName,
+      customerPhone,
+      total,
+      subtotal,
+      discount
+    } = req.body;
+
+    // Verify retailer exists and is active
+    const retailer = await Admin.findOne({ user: retailerId, isActive: true });
+    if (!retailer) {
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: 'Retailer profile not found or inactive'
+      });
+    }
+
+    // 🔥 CRITICAL FIX: Get retailer's inventory to use overridden prices
+    console.log('💰 Fetching retailer inventory for offline order...');
+    const inventoryItems = await getRetailerInventoryPrices(retailer._id, req.headers.authorization);
+    console.log(`📦 Retrieved ${inventoryItems.length} inventory items for offline order`);
+
+    // Validate items and calculate total with OVERRIDDEN PRICES
+    let calculatedTotal = 0;
+    let calculatedSubtotal = 0;
+    const orderItems = [];
+
+    for (const item of items) {
+      const product = await Product.findById(item.productId);
+      if (!product) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Product not found: ${item.productId}`
+        });
+      }
+
+      if (!product.isAvailable) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `Product not available: ${product.name}`
+        });
+      }
+
+      // 🔥 CRITICAL FIX: Find retailer's overridden price
+      let finalPrice = product.price; // Default to catalog price
+      let isPriceOverridden = false;
+
+      const inventoryItem = inventoryItems.find(inv => {
+        const inventoryProductId = inv.product?._id || inv.product;
+        return inventoryProductId && inventoryProductId.toString() === item.productId.toString();
+      });
+
+      if (inventoryItem && inventoryItem.sellingPrice) {
+        finalPrice = inventoryItem.sellingPrice;
+        isPriceOverridden = finalPrice !== product.price;
+        console.log(`💰 Price override for ${product.name}: ${product.price} → ${finalPrice} (Overridden: ${isPriceOverridden})`);
+      } else {
+        console.log(`💰 Using catalog price for ${product.name}: ${finalPrice}`);
+      }
+
+      const itemTotal = finalPrice * item.quantity;
+      calculatedTotal += itemTotal;
+      calculatedSubtotal += itemTotal;
+
+      orderItems.push({
+        product: product._id,
+        quantity: item.quantity,
+        price: finalPrice, // 🔥 Use overridden price
+        originalPrice: product.price, // Store original for reference
+        isPriceOverridden: isPriceOverridden, // Track if price was overridden
+        priceSource: isPriceOverridden ? 'retailer_inventory' : 'catalog',
+        unit: product.unit,
+        reservedQuantity: 0,
+        isReserved: false,
+        productName: product.name, // Store product name for offline reference
+        barcodeId: item.barcodeId, // Store barcode info
+        scannedBarcodeId: item.scannedBarcodeId
+      });
+    }
+
+    // Use provided totals or calculate our own
+    const finalTotal = total || calculatedTotal;
+    const finalSubtotal = subtotal || calculatedSubtotal;
+    const finalDiscount = discount || 0;
+
+    console.log('🧮 Offline order totals:', {
+      calculatedTotal,
+      calculatedSubtotal,
+      providedTotal: total,
+      providedSubtotal: subtotal,
+      finalTotal,
+      finalSubtotal,
+      finalDiscount
+    });
+
+    // Check retailer inventory availability
+    const stockCheck = await inventoryService.checkStockAvailability(retailer._id, items);
+    if (!stockCheck.allAvailable) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Some items are out of stock',
+        stockDetails: stockCheck.items
+      });
+    }
+
+    // Create offline order
+    const order = new Order({
+      orderId: generateOrderId(),
+      items: orderItems,
+      totalAmount: finalSubtotal,
+      finalAmount: finalTotal,
+      discount: finalDiscount,
+      paymentMethod: paymentMethod || 'cash',
+      paymentStatus: 'paid', // Offline orders are paid immediately
+      specialInstructions,
+      orderType: 'offline',
+      processedBy: retailer._id,
+      assignedRetailer: retailer._id,
+      assignmentDetails: {
+        assignedAt: new Date(),
+        distance: 0,
+        retailerName: retailer.fullName,
+        retailerShop: retailer.shopName,
+        serviceRadius: retailer.serviceRadius
+      },
+      reservationStatus: 'not_reserved',
+      orderStatus: 'delivered', // Offline orders are completed immediately
+      deliveryDate: new Date(),
+      customerName,
+      customerPhone,
+      priceSource: orderItems.some(item => item.isPriceOverridden) ? 'retailer_inventory' : 'catalog',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+
+    await order.save({ session });
+
+    // Reserve stock for offline order
+    try {
+      const reservationResult = await inventoryService.reserveStockForOrder(
+        order._id,
+        retailer._id,
+        items.map(item => ({
+          productId: item.productId,
+          quantity: item.quantity
+        })),
+        req.user._id
+      );
+
+      // Update order with reservation status
+      order.reservationStatus = 'reserved';
+      order.reservationDate = new Date();
+
+      // Update order items with reservation info
+      order.items.forEach((item, index) => {
+        item.reservedQuantity = items[index].quantity;
+        item.isReserved = true;
+      });
+
+      await order.save({ session });
+
+      // Immediately mark as delivered and deduct stock
+      const deliveryResult = await inventoryService.confirmOrderDelivery(
+        order._id,
+        retailer._id,
+        req.user._id
+      );
+
+      order.reservationStatus = 'delivered';
+      order.deliveredAt = new Date();
+      await order.save({ session });
+
+      await session.commitTransaction();
+
+      // Populate order for response
+      await order.populate('items.product', 'name image unit');
+
+      console.log('✅ Offline order created successfully with overridden prices');
+
+      res.status(201).json({
+        success: true,
+        message: 'Offline order created and completed successfully',
+        order: {
+          _id: order._id,
+          orderId: order.orderId,
+          totalAmount: order.totalAmount,
+          finalAmount: order.finalAmount,
+          discount: order.discount,
+          orderStatus: order.orderStatus,
+          reservationStatus: order.reservationStatus,
+          orderType: order.orderType,
+          items: order.items.map(item => ({
+            product: item.product,
+            quantity: item.quantity,
+            price: item.price,
+            originalPrice: item.originalPrice,
+            isPriceOverridden: item.isPriceOverridden,
+            priceSource: item.priceSource,
+            unit: item.unit,
+            productName: item.productName
+          })),
+          customerName: order.customerName,
+          customerPhone: order.customerPhone,
+          processedBy: {
+            retailerName: retailer.fullName,
+            shopName: retailer.shopName
+          },
+          priceSource: order.priceSource
+        }
+      });
+
+    } catch (reservationError) {
+      await Order.findByIdAndDelete(order._id).session(session);
+      await session.abortTransaction();
+
+      console.error('❌ Stock reservation failed for offline order:', reservationError);
+
+      res.status(400).json({
+        success: false,
+        message: 'Order creation failed: Could not reserve stock. ' + reservationError.message
+      });
+    }
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Create Offline Order Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while creating offline order',
+      error: error.message
+    });
+  } finally {
+    session.endSession();
+  }
+};
+
+// Update the getRetailerOrderHistory function to ensure proper population
+export const getRetailerOrderHistory = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { page = 1, limit = 10, status, type } = req.query;
+
+    console.log('📋 Retailer order history request:', { retailerId: userId, status, page, limit, type });
+
+    // Verify retailer exists
+    const retailer = await Admin.findOne({ user: userId });
+    if (!retailer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Retailer profile not found'
+      });
+    }
+
+    // For order history, show ALL assigned orders regardless of status
+    const filter = { assignedRetailer: retailer._id };
+
+    // Additional status filter if provided
+    if (status && status !== 'all') {
+      filter.orderStatus = status;
+    }
+
+    // Filter by order type if provided
+    if (type && type !== 'all') {
+      filter.orderType = type;
+    }
+
+    console.log('🔍 Order history filter:', filter);
+
+    // Get all orders assigned to this retailer with pagination
+    const orders = await Order.find(filter)
+      .populate('items.product', 'name image unit milkType price')
+      .populate('customer', 'personalInfo.fullName deliveryAddress')
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    console.log(`📊 Found ${orders.length} orders in history for retailer`);
+
+    // Process orders to ensure correct price display
+    const processedOrders = orders.map(order => {
+      const processedItems = order.items.map(item => {
+        // For ALL orders, ensure we use the stored price from the order (which includes overrides)
+        return {
+          ...item.toObject(),
+          // Use the price that was actually charged (from order creation)
+          displayPrice: item.price,
+          finalPrice: item.price,
+          isPriceOverridden: item.isPriceOverridden || false,
+          originalPrice: item.originalPrice || item.product?.price || 0,
+          priceSource: item.priceSource || 'catalog'
+        };
+      });
+
+      return {
+        ...order.toObject(),
+        items: processedItems
+      };
+    });
+
+    const total = await Order.countDocuments(filter);
+
+    res.status(200).json({
+      success: true,
+      orders: processedOrders,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        totalOrders: total
+      },
+      retailer: {
+        shopName: retailer.shopName,
+        serviceRadius: retailer.serviceRadius
+      }
+    });
+  } catch (error) {
+    console.error('❌ Get Retailer Order History Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
   }
 };
 
@@ -288,17 +684,29 @@ export const getCustomerOrders = async (req, res) => {
     }
 
     const orders = await Order.find(filter)
-      .populate('items.product', 'name image unit')
+      .populate('items.product', 'name image unit price') // Include price in population
       .populate('assignedRetailer', 'shopName fullName contactNumber')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
 
+    // Process orders to ensure correct price display
+    const processedOrders = orders.map(order => ({
+      ...order.toObject(),
+      items: order.items.map(item => ({
+        ...item.toObject(),
+        displayPrice: item.price, // Use stored order price
+        finalPrice: item.price,
+        isPriceOverridden: item.isPriceOverridden || false,
+        originalPrice: item.originalPrice || item.product?.price || 0
+      }))
+    }));
+
     const total = await Order.countDocuments(filter);
 
     res.status(200).json({
       success: true,
-      orders,
+      orders: processedOrders,
       pagination: {
         currentPage: parseInt(page),
         totalPages: Math.ceil(total / limit),
@@ -916,6 +1324,7 @@ export const markOrderDelivered = async (req, res) => {
     });
   }
 };
+
 export const getRetailerActiveOrders = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -979,255 +1388,3 @@ export const getRetailerActiveOrders = async (req, res) => {
     });
   }
 };
-
-// @desc    Create offline order (from QR scanning)
-// @route   POST /api/orders/offline
-// @access  Private/Retailer
-export const createOfflineOrder = async (req, res) => {
-  const session = await mongoose.startSession();
-
-  try {
-    session.startTransaction();
-
-    const retailerId = req.user._id;
-    const {
-      items,
-      paymentMethod,
-      specialInstructions,
-      customerName,
-      customerPhone
-    } = req.body;
-
-    // Verify retailer exists and is active
-    const retailer = await Admin.findOne({ user: retailerId, isActive: true });
-    if (!retailer) {
-      await session.abortTransaction();
-      return res.status(404).json({
-        success: false,
-        message: 'Retailer profile not found or inactive'
-      });
-    }
-
-    // Validate items and calculate total
-    let totalAmount = 0;
-    const orderItems = [];
-
-    for (const item of items) {
-      const product = await Product.findById(item.productId);
-      if (!product) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Product not found: ${item.productId}`
-        });
-      }
-
-      if (!product.isAvailable) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Product not available: ${product.name}`
-        });
-      }
-
-      const itemTotal = product.price * item.quantity;
-      totalAmount += itemTotal;
-
-      orderItems.push({
-        product: product._id,
-        quantity: item.quantity,
-        price: product.price,
-        unit: product.unit,
-        reservedQuantity: 0,
-        isReserved: false
-      });
-    }
-
-    // Check retailer inventory availability
-    const stockCheck = await inventoryService.checkStockAvailability(retailer._id, items);
-    if (!stockCheck.allAvailable) {
-      await session.abortTransaction();
-      return res.status(400).json({
-        success: false,
-        message: 'Some items are out of stock',
-        stockDetails: stockCheck.items
-      });
-    }
-
-    // Create offline order
-    const order = new Order({
-      orderId: generateOrderId(),
-      items: orderItems,
-      totalAmount,
-      finalAmount: totalAmount,
-      paymentMethod: paymentMethod || 'cash',
-      paymentStatus: 'paid', // Offline orders are paid immediately
-      specialInstructions,
-      orderType: 'offline',
-      processedBy: retailer._id,
-      assignedRetailer: retailer._id,
-      assignmentDetails: {
-        assignedAt: new Date(),
-        distance: 0,
-        retailerName: retailer.fullName,
-        retailerShop: retailer.shopName,
-        serviceRadius: retailer.serviceRadius
-      },
-      reservationStatus: 'not_reserved',
-      orderStatus: 'delivered', // Offline orders are completed immediately
-      deliveryDate: new Date(),
-      customerName,
-      customerPhone
-    });
-
-    await order.save({ session });
-
-    // Reserve stock for offline order
-    try {
-      const reservationResult = await inventoryService.reserveStockForOrder(
-        order._id,
-        retailer._id,
-        items,
-        req.user._id
-      );
-
-      // Update order with reservation status
-      order.reservationStatus = 'reserved';
-      order.reservationDate = new Date();
-
-      // Update order items with reservation info
-      order.items.forEach((item, index) => {
-        item.reservedQuantity = items[index].quantity;
-        item.isReserved = true;
-      });
-
-      await order.save({ session });
-
-      // Immediately mark as delivered and deduct stock
-      const deliveryResult = await inventoryService.confirmOrderDelivery(
-        order._id,
-        retailer._id,
-        req.user._id
-      );
-
-      order.reservationStatus = 'delivered';
-      order.deliveredAt = new Date();
-      await order.save({ session });
-
-      await session.commitTransaction();
-
-      // Populate order for response
-      await order.populate('items.product', 'name image unit');
-
-      res.status(201).json({
-        success: true,
-        message: 'Offline order created and completed successfully',
-        order: {
-          _id: order._id,
-          orderId: order.orderId,
-          totalAmount: order.totalAmount,
-          finalAmount: order.finalAmount,
-          orderStatus: order.orderStatus,
-          reservationStatus: order.reservationStatus,
-          orderType: order.orderType,
-          items: order.items,
-          customerName: order.customerName,
-          customerPhone: order.customerPhone,
-          processedBy: {
-            retailerName: retailer.fullName,
-            shopName: retailer.shopName
-          }
-        }
-      });
-
-    } catch (reservationError) {
-      await Order.findByIdAndDelete(order._id).session(session);
-      await session.abortTransaction();
-
-      console.error('Stock reservation failed:', reservationError);
-
-      res.status(400).json({
-        success: false,
-        message: 'Order creation failed: Could not reserve stock. ' + reservationError.message
-      });
-    }
-
-  } catch (error) {
-    await session.abortTransaction();
-    console.error('Create Offline Order Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while creating offline order',
-      error: error.message
-    });
-  } finally {
-    session.endSession();
-  }
-};
-
-export const getRetailerOrderHistory = async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const { page = 1, limit = 10, status, type } = req.query;
-
-    console.log('Retailer order history request:', { retailerId: userId, status, page, limit, type });
-
-    // Verify retailer exists
-    const retailer = await Admin.findOne({ user: userId });
-    if (!retailer) {
-      return res.status(404).json({
-        success: false,
-        message: 'Retailer profile not found'
-      });
-    }
-
-    // For order history, show ALL assigned orders regardless of status
-    const filter = { assignedRetailer: retailer._id };
-
-    // Additional status filter if provided
-    if (status && status !== 'all') {
-      filter.orderStatus = status;
-    }
-
-    // Filter by order type if provided
-    if (type && type !== 'all') {
-      filter.orderType = type;
-    }
-
-    console.log('Order history filter:', filter);
-
-    // Get all orders assigned to this retailer with pagination
-    const orders = await Order.find(filter)
-      .populate('items.product', 'name image unit milkType')
-      .populate('customer', 'personalInfo.fullName deliveryAddress')
-      .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
-
-    console.log(`Found ${orders.length} orders in history for retailer`);
-
-    const total = await Order.countDocuments(filter);
-
-    res.status(200).json({
-      success: true,
-      orders,
-      pagination: {
-        currentPage: parseInt(page),
-        totalPages: Math.ceil(total / limit),
-        totalOrders: total
-      },
-      retailer: {
-        shopName: retailer.shopName,
-        serviceRadius: retailer.serviceRadius
-      }
-    });
-  } catch (error) {
-    console.error('Get Retailer Order History Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error',
-      error: error.message
-    });
-  }
-};
-
