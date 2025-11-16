@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 {
   "name": "dairy9-backend",
   "version": "1.0.0",
@@ -34,3 +35,39 @@
   "js-yaml": "4.1.1"
 }
 }
+=======
+{
+  "name": "dairy9-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "axios": "^1.13.1",
+    "bcryptjs": "^3.0.2",
+    "bwip-js": "^4.7.0",
+    "cloudinary": "^2.8.0",
+    "cors": "^2.8.5",
+    "debug": "^4.4.3",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "express-async-handler": "^1.2.0",
+    "express-rate-limit": "^8.2.1",
+    "express-validator": "^7.3.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^7.8.7",
+    "multer": "^2.0.2",
+    "pdfkit": "^0.17.2",
+    "qrcode": "^1.5.4",
+    "sharp": "^0.34.5",
+    "streamifier": "^0.1.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
+>>>>>>> 24a5d9c003456c495eaea13e6177c5a67b465108

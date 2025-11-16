@@ -16,15 +16,36 @@ const orderItemSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  // 🔥 ADDED FIELDS FOR PRICE OVERRIDE TRACKING
+  originalPrice: {
+    type: Number,
+    default: 0
+  },
+  isPriceOverridden: {
+    type: Boolean,
+    default: false
+  },
+  priceSource: {
+    type: String,
+    enum: ['catalog', 'retailer_inventory'],
+    default: 'catalog'
+  },
   unit: String,
-    reservedQuantity: {
+  reservedQuantity: {
     type: Number,
     default: 0
   },
   isReserved: {
     type: Boolean,
     default: false
-  }
+  },
+  // 🔥 ADDED FOR OFFLINE ORDERS
+  productName: {
+    type: String,
+    default: ''
+  },
+  barcodeId: String,
+  scannedBarcodeId: String
 });
 
 const orderSchema = new mongoose.Schema({
@@ -36,13 +57,29 @@ const orderSchema = new mongoose.Schema({
   customer: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Customer',
-    required: true
+    required: function() {
+      return this.orderType === 'online';
+    }
   },
   items: [orderItemSchema],
   totalAmount: {
     type: Number,
     required: true,
     min: 0
+  },
+  // 🔥 ADDED FOR PRICE OVERRIDE TRACKING
+  originalPrice: {
+    type: Number,
+    default: 0
+  },
+  isPriceOverridden: {
+    type: Boolean,
+    default: false
+  },
+  priceSource: {
+    type: String,
+    enum: ['catalog', 'retailer_inventory'],
+    default: 'catalog'
   },
   discount: {
     type: Number,
@@ -109,7 +146,22 @@ const orderSchema = new mongoose.Schema({
   specialInstructions: String,
   razorpayOrderId: String,
   razorpayPaymentId: String,
-  razorpaySignature: String
+  razorpaySignature: String,
+  // 🔥 ADDED FOR OFFLINE ORDER SUPPORT
+  orderType: {
+    type: String,
+    enum: ['online', 'offline'],
+    default: 'online'
+  },
+  processedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Admin',
+    index: true
+  },
+  // 🔥 ADDED FOR OFFLINE ORDER CUSTOMER INFO
+  customerName: String,
+  customerPhone: String,
+  deliveredAt: Date
 }, { 
   timestamps: true 
 });
@@ -118,6 +170,8 @@ const orderSchema = new mongoose.Schema({
 orderSchema.index({ assignedRetailer: 1, orderStatus: 1 });
 orderSchema.index({ customer: 1, createdAt: -1 });
 orderSchema.index({ orderStatus: 1 });
+orderSchema.index({ orderType: 1 }); // Added for offline orders
+orderSchema.index({ processedBy: 1 }); // Added for retailer processing
 
 const Order = mongoose.model('Order', orderSchema);
 export default Order;
