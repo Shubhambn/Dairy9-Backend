@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 
+// In your Order model, update the orderItemSchema:
 const orderItemSchema = new mongoose.Schema({
   product: {
     type: mongoose.Schema.Types.ObjectId,
@@ -16,8 +17,22 @@ const orderItemSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  // 🔥 ADD THESE FIELDS FOR PRICE OVERRIDE TRACKING
+  originalPrice: {
+    type: Number,
+    default: 0
+  },
+  isPriceOverridden: {
+    type: Boolean,
+    default: false
+  },
+  priceSource: {
+    type: String,
+    enum: ['catalog', 'retailer_inventory'],
+    default: 'catalog'
+  },
   unit: String,
-    reservedQuantity: {
+  reservedQuantity: {
     type: Number,
     default: 0
   },
@@ -26,7 +41,6 @@ const orderItemSchema = new mongoose.Schema({
     default: false
   }
 });
-
 const orderSchema = new mongoose.Schema({
   orderId: {
     type: String,
@@ -45,6 +59,20 @@ const orderSchema = new mongoose.Schema({
     type: Number,
     required: true,
     min: 0
+  },
+
+   // 🔥 ADD THESE NEW FIELDS FOR PRICE OVERRIDE TRACKING
+  originalPrice: {
+    type: Number,
+    default: 0
+  },
+  isPriceOverridden: {
+    type: Boolean,
+    default: false
+  },
+  productName: {
+    type: String, // Store product name for offline orders
+    default: ''
   },
   discount: {
     type: Number,
