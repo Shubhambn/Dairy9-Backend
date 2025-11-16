@@ -9,6 +9,11 @@ import { getAllCustomers, getCustomerDetails, getCustomerOrders } from '../contr
 import { generateSalesReport, generateRetailerPerformanceReport, generateCustomerAnalyticsReport, generateProductPerformanceReport, generateSystemOverviewReport } from '../controllers/superadmin.reports.controller.js';
 import { getActionLogs, clearOldLogs, exportLogs } from '../controllers/superadmin.logs.controller.js';
 import { getStockOrders,getStockOrderById,lockStockOrder ,releaseStockOrderLock,superAdminActOnOrder,getStockOrderTransactions,addNoteToStockOrder} from '../controllers/stockOrders.controller.js';
+import {createProduct,updateProduct,deleteProduct,uploadProductImages,deleteProductImage} from '../controllers/product.controller.js';
+import {createCategory,deleteCategory,updateCategory} from '../controllers/category.controller.js';
+import auth from '../middlewares/auth.js';
+import upload from '../middlewares/upload.js';
+
 const router = express.Router();
 
 // Test endpoint
@@ -57,6 +62,23 @@ router.get('/reports/retailer-performance', generateRetailerPerformanceReport);
 router.get('/reports/customer-analytics', generateCustomerAnalyticsReport);
 router.get('/reports/product-performance', generateProductPerformanceReport);
 router.get('/reports/system-overview', generateSystemOverviewReport);
+
+
+// Product & Category
+// Protected routes (SuperAdmin) with file upload
+router.post('/products', auth, upload.single('image'), createProduct);
+router.put('/products/:id', auth, upload.single('image'), updateProduct);
+router.delete('/products/:id', auth, deleteProduct);
+
+// Image management routes
+router.post('/products/:id/images', auth, upload.array('images', 5), uploadProductImages);
+router.delete('/products/:id/images/:imageId', auth, deleteProductImage);
+
+
+// Protected routes (SuperAdmin only)
+router.post('/categories', upload.single('image'), createCategory);
+router.put('/categories/:id', upload.single('image'), updateCategory);
+router.delete('/categories/:id', deleteCategory);
 
 // Logs
 router.get('/logs/actions', getActionLogs);

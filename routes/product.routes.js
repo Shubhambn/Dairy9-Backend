@@ -12,8 +12,6 @@ import {
   uploadProductImages,
   deleteProductImage
 } from '../controllers/product.controller.js';
-import auth from '../middlewares/auth.js';
-import upload from '../middlewares/upload.js';
 import { generateProductQR,scanProductQR  } from '../controllers/product.controller.js';
 import { testCloudinaryConnection } from '../utils/cloudinaryUpload.js'; // adjust path if needed
 
@@ -25,15 +23,6 @@ router.get('/products', getAllProducts);
 router.get('/products/featured', getFeaturedProducts);
 router.get('/products/search', searchProducts);
 router.get('/products/:id', getProductById);
-
-// Protected routes (Admin) with file upload
-router.post('/products', auth, upload.single('image'), createProduct);
-router.put('/products/:id', auth, upload.single('image'), updateProduct);
-router.delete('/products/:id', auth, deleteProduct);
-
-// Image management routes
-router.post('/products/:id/images', auth, upload.array('images', 5), uploadProductImages);
-router.delete('/products/:id/images/:imageId', auth, deleteProductImage);
 
 // Generate QR for a product
 router.post("/generate/:id", generateProductQR);
