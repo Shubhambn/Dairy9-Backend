@@ -43,15 +43,6 @@ const productSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
-  stock: {
-    type: Number,
-    default: 0,
-    min: 0
-  },
-  isAvailable: {
-    type: Boolean,
-    default: true
-  },
   milkType: {
     type: String,
     enum: ['Cow', 'Buffalo', 'Mixed', 'None'],

@@ -1,180 +1,176 @@
-// controllers/order.controller.js
+// controllers/order.controller.js (replace createOrder)
 import mongoose from 'mongoose';
 import Customer from '../models/customer.model.js';
 import Order from '../models/order.model.js';
 import Product from '../models/product.model.js';
 import Admin from '../models/admin.model.js';
-import { getClosestRetailer, validateCoordinates, calculateDistance } from '../utils/locationUtils.js';
+import { getClosestRetailer, validateCoordinates } from '../utils/locationUtils.js';
 import inventoryService from '../services/inventory.service.js';
 
-// Generate unique order ID
-const generateOrderId = () => {
-  return 'ORD' + Date.now() + Math.floor(Math.random() * 1000);
-};
+const generateOrderId = () => 'ORD' + Date.now() + Math.floor(Math.random() * 1000);
 
-// Helper function to find order by ID (supports both orderId string and MongoDB _id)
 const findOrderById = async (orderIdentifier) => {
-  if (orderIdentifier.startsWith('ORD')) {
-    return await Order.findOne({ orderId: orderIdentifier });
+  if (!orderIdentifier) return null;
+  if (typeof orderIdentifier === 'string' && orderIdentifier.startsWith('ORD')) {
+    return Order.findOne({ orderId: orderIdentifier });
   } else {
-    return await Order.findById(orderIdentifier);
+    return Order.findById(orderIdentifier);
   }
 };
 
-// @desc    Create new order WITH INVENTORY RESERVATION
-// @route   POST /api/orders
-// @access  Private
 export const createOrder = async (req, res) => {
-  const session = await mongoose.startSession(); // 👈 ADD SESSION
-  
+  const session = await mongoose.startSession();
+
   try {
-    session.startTransaction(); // 👈 START TRANSACTION
+    session.startTransaction();
 
     const userId = req.user._id;
-    const { 
-      items, 
-      deliveryAddress, 
-      deliveryTime, 
-      paymentMethod, 
-      specialInstructions 
+    const {
+      items: rawItems,
+      deliveryAddress: providedAddress,
+      deliveryTime,
+      paymentMethod,
+      specialInstructions,
+      retailerId: requestedRetailerId, // optional override from client
+      temporary = true
     } = req.body;
 
-    // Get customer profile
-    const customer = await Customer.findOne({ user: userId });
+    // basic validation
+    if (!Array.isArray(rawItems) || rawItems.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'No items provided' });
+    }
+
+    // normalize items and validate quantities
+    const items = rawItems.map(it => ({
+      productId: it.productId || it.product?._id || it.product?.id,
+      quantity: Number(it.quantity) || 0
+    }));
+
+    for (const it of items) {
+      if (!it.productId || it.quantity <= 0) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid product or quantity in items',
+          details: it
+        });
+      }
+    }
+
+    // fetch customer
+    const customer = await Customer.findOne({ user: userId }).session(session);
     if (!customer) {
       await session.abortTransaction();
-      return res.status(404).json({
-        success: false,
-        message: 'Customer profile not found. Please complete your profile first.'
-      });
+      return res.status(404).json({ success: false, message: 'Customer profile not found' });
     }
 
-    // Validate items and calculate total
-    let totalAmount = 0;
-    const orderItems = [];
-
-    // 👇 REMOVE OLD STOCK CHECK - We'll check retailer inventory instead
-    for (const item of items) {
-      const product = await Product.findById(item.productId);
-      if (!product) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Product not found: ${item.productId}`
-        });
-      }
-
-      if (!product.isAvailable) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Product not available: ${product.name}`
-        });
-      }
-
-      // ✅ REMOVE: product.stock check - we'll check retailer inventory
-
-      const itemTotal = product.price * item.quantity;
-      totalAmount += itemTotal;
-
-      orderItems.push({
-        product: product._id,
-        quantity: item.quantity,
-        price: product.price,
-        unit: product.unit,
-        reservedQuantity: 0, // 👈 ADD RESERVATION TRACKING
-        isReserved: false    // 👈 ADD RESERVATION STATUS
-      });
-    }
-
-    // Find the closest retailer for order assignment
-    let assignedRetailer = null;
-    let assignmentDetails = null;
-    
-    // Use provided delivery address or customer's default address
-    const addressToUse = deliveryAddress || customer.deliveryAddress;
-    
+    // choose delivery address (prefer provided, else profile)
+    const addressToUse = providedAddress || customer.deliveryAddress;
     if (!addressToUse) {
       await session.abortTransaction();
       return res.status(400).json({
         success: false,
-        message: 'Delivery address is required. Please add a delivery address to your profile or provide one during checkout.'
+        message: 'Delivery address required'
       });
     }
 
-    let customerLocation = addressToUse.coordinates;
-    
-    if (!customerLocation || !customerLocation.latitude || !customerLocation.longitude) {
+    // coordinates must exist
+    const coords = addressToUse.coordinates;
+    if (!coords || typeof coords.latitude !== 'number' || typeof coords.longitude !== 'number') {
       await session.abortTransaction();
-      console.log('Coordinates missing in delivery address');
       return res.status(400).json({
         success: false,
-        message: 'Delivery address coordinates are required. Please provide a valid address with location coordinates to place an order.',
-        suggestion: 'Please update your delivery address with proper location coordinates or select your location on the map.'
+        message: 'Delivery address coordinates are required. Please provide latitude and longitude.'
       });
+    }
+
+    if (!validateCoordinates(coords.latitude, coords.longitude)) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'Invalid delivery coordinates' });
+    }
+
+    // find assigned retailer: priority -> client requested retailerId -> closest retailer within radius
+    let assignedRetailer = null;
+    let assignmentDetails = null;
+
+    if (requestedRetailerId) {
+      assignedRetailer = await Admin.findById(requestedRetailerId).lean();
+      if (!assignedRetailer || !assignedRetailer.isActive) {
+        await session.abortTransaction();
+        return res.status(400).json({ success: false, message: 'Requested retailer not found or inactive' });
+      }
+      assignmentDetails = { retailerName: assignedRetailer.fullName, retailerShop: assignedRetailer.shopName };
     } else {
-      // Validate customer coordinates
-      if (!validateCoordinates(customerLocation.latitude, customerLocation.longitude)) {
+      // fetch active retailers and pick closest
+      const retailers = await Admin.find({ isActive: true }).lean();
+      if (!retailers || retailers.length === 0) {
         await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid delivery address coordinates'
-        });
+        return res.status(400).json({ success: false, message: 'No active retailers available' });
       }
 
-      // Get all active retailers
-      const retailers = await Admin.find({ isActive: true });
-      
-      if (retailers.length === 0) {
+      const closest = getClosestRetailer(coords.latitude, coords.longitude, retailers, 100); // radius kms
+      if (!closest || !closest.retailer) {
         await session.abortTransaction();
         return res.status(400).json({
           success: false,
-          message: 'No active retailers available at the moment'
+          message: 'No retailer within service radius'
         });
       }
-
-      // Find the closest retailer within service radius
-      const closestRetailerInfo = getClosestRetailer(
-        customerLocation.latitude,
-        customerLocation.longitude,
-        retailers,
-        100 // 50km max radius
-      );
-      
-      if (closestRetailerInfo && closestRetailerInfo.retailer) {
-        assignedRetailer = closestRetailerInfo.retailer._id;
-        assignmentDetails = {
-          distance: closestRetailerInfo.distance,
-          retailerName: closestRetailerInfo.retailer.fullName,
-          retailerShop: closestRetailerInfo.retailer.shopName,
-          serviceRadius: closestRetailerInfo.retailer.serviceRadius
-        };
-        
-        console.log(`Order assigned to retailer: ${closestRetailerInfo.retailer.shopName} (${closestRetailerInfo.distance}km away)`);
-      } else {
-        await session.abortTransaction();
-        console.log('No retailer found within service radius');
-        return res.status(400).json({
-          success: false,
-          message: 'No retailer available within your delivery area. Please try a different address or contact customer support.',
-          suggestion: 'No active retailer found within the service radius for your delivery location.'
-        });
-      }
+      assignedRetailer = closest.retailer;
+      assignmentDetails = {
+        distance: closest.distance,
+        retailerName: assignedRetailer.fullName,
+        retailerShop: assignedRetailer.shopName,
+        serviceRadius: assignedRetailer.serviceRadius
+      };
     }
 
-    // 👇 CHECK RETAILER INVENTORY AVAILABILITY
-    const stockCheck = await inventoryService.checkStockAvailability(assignedRetailer, items);
-    if (!stockCheck.allAvailable) {
+    // Check retailer inventory availability and get seller prices via inventoryService
+    // Expected return: { allAvailable: boolean, items: [{ productId, available, availableQty, sellingPrice, message }] }
+    const stockCheck = await inventoryService.checkStockAvailability(assignedRetailer._id, items);
+    if (!stockCheck || !stockCheck.allAvailable) {
       await session.abortTransaction();
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
-        message: 'Some items are out of stock with the assigned retailer',
-        stockDetails: stockCheck.items,
-        retailer: assignmentDetails.retailerShop
+        message: 'Some items are unavailable at the assigned retailer',
+        stockDetails: stockCheck?.items || []
       });
     }
 
-    // Create order
+    // Build order items using seller price (fallback to product.price if missing)
+    let totalAmount = 0;
+    const orderItems = [];
+
+    // create a map from stockCheck items for quick lookups
+    const stockMap = new Map();
+    (stockCheck.items || []).forEach(si => stockMap.set(String(si.productId), si));
+
+    for (const it of items) {
+      // fetch product metadata (name/unit) for richer order line (no heavy checks)
+      const product = await Product.findById(it.productId).lean();
+      if (!product) {
+        await session.abortTransaction();
+        return res.status(400).json({ success: false, message: `Product not found: ${it.productId}` });
+      }
+
+      const stockInfo = stockMap.get(String(it.productId));
+      const unitPrice = stockInfo?.sellingPrice ?? product.discountedPrice ?? product.price ?? 0;
+      const itemTotal = unitPrice * it.quantity;
+      totalAmount += itemTotal;
+
+      orderItems.push({
+        product: product._id,
+        productName: product.name,
+        quantity: it.quantity,
+        price: unitPrice,
+        unit: product.unit,
+        reservedQuantity: 0,
+        isReserved: false
+      });
+    }
+
+    // Create the Order document (inside session)
     const order = new Order({
       orderId: generateOrderId(),
       customer: customer._id,
@@ -182,87 +178,87 @@ export const createOrder = async (req, res) => {
       totalAmount,
       finalAmount: totalAmount,
       deliveryAddress: addressToUse,
-      deliveryTime: deliveryTime || customer.preferences?.deliveryTime,
+      deliveryTime: deliveryTime || customer.preferences?.deliveryTime || null,
       paymentMethod: paymentMethod || 'cash',
-      specialInstructions,
+      specialInstructions: specialInstructions || '',
       deliveryDate: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      assignedRetailer,
+      assignedRetailer: assignedRetailer._id,
       assignmentDetails,
-      reservationStatus: 'not_reserved', // 👈 ADD RESERVATION STATUS
+      reservationStatus: 'not_reserved',
       orderStatus: 'pending'
     });
 
     await order.save({ session });
 
-    // 👇 RESERVE STOCK IN RETAILER INVENTORY
-    try {
-      const reservationResult = await inventoryService.reserveStockForOrder(
-        order._id,
-        assignedRetailer,
-        items,
-        req.user._id
-      );
+    // Reserve stock using inventoryService (implementation must update retailer inventory transactionally where possible).
+    // reserveStockForOrder should return an object { success: boolean, reservedItems: [...], message }
+    const reservationResult = await inventoryService.reserveStockForOrder(order._id, assignedRetailer._id, items, userId);
 
-      // Update order with reservation status
-      order.reservationStatus = 'reserved';
-      order.reservationDate = new Date();
-      
-      // Update order items with reservation info
-      order.items.forEach((item, index) => {
-        item.reservedQuantity = items[index].quantity;
-        item.isReserved = true;
-      });
-
-      await order.save({ session });
-      await session.commitTransaction(); // 👈 COMMIT TRANSACTION
-
-      // Populate order for response
-      await order.populate('items.product', 'name image unit');
-      await order.populate('assignedRetailer', 'shopName fullName contactNumber');
-
-      res.status(201).json({
-        success: true,
-        message: 'Order created successfully and stock reserved',
-        order: {
-          _id: order._id,
-          orderId: order.orderId,
-          totalAmount: order.totalAmount,
-          finalAmount: order.finalAmount,
-          orderStatus: order.orderStatus,
-          reservationStatus: order.reservationStatus,
-          assignedRetailer: order.assignedRetailer,
-          items: order.items,
-          reservationDetails: {
-            reservedItems: reservationResult.reservedItems.length,
-            message: reservationResult.message
-          }
-        }
-      });
-
-    } catch (reservationError) {
-      // If reservation fails, delete the order
+    if (!reservationResult || !reservationResult.success) {
+      // reservation failed -> rollback
       await Order.findByIdAndDelete(order._id).session(session);
       await session.abortTransaction();
-      
-      console.error('Stock reservation failed:', reservationError);
-      
-      res.status(400).json({
+      return res.status(409).json({
         success: false,
-        message: 'Order creation failed: Could not reserve stock. ' + reservationError.message,
-        suggestion: 'Please try again or contact customer support.'
+        message: 'Failed to reserve stock for order',
+        details: reservationResult?.message || 'Reservation failed'
       });
     }
 
-  } catch (error) {
+    // Update order items with reserved info
+    order.reservationStatus = 'reserved';
+    order.reservationDate = new Date();
+
+    // map reserved quantities from reservation result
+    const reservedMap = new Map();
+    (reservationResult.reservedItems || []).forEach(r => reservedMap.set(String(r.productId), r));
+
+    order.items = order.items.map(li => {
+      const r = reservedMap.get(String(li.product));
+      if (r) {
+        li.reservedQuantity = r.quantity;
+        li.isReserved = true;
+      }
+      return li;
+    });
+
+    await order.save({ session });
+
+    await session.commitTransaction();
+
+    // populate for response (outside transaction)
+    await order.populate('items.product', 'name image unit').execPopulate?.() /* backward compat */; 
+    await order.populate('assignedRetailer', 'shopName fullName contactNumber');
+
+    return res.status(201).json({
+      success: true,
+      message: 'Order created and stock reserved',
+      order: {
+        _id: order._id,
+        orderId: order.orderId,
+        totalAmount: order.totalAmount,
+        finalAmount: order.finalAmount,
+        orderStatus: order.orderStatus,
+        reservationStatus: order.reservationStatus,
+        assignedRetailer: order.assignedRetailer,
+        items: order.items
+      },
+      reservationSummary: {
+        reservedCount: reservationResult.reservedItems.length,
+        message: reservationResult.message
+      }
+    });
+
+  } catch (err) {
     await session.abortTransaction();
-    console.error('Create Order Error:', error);
-    res.status(500).json({
+    console.error('Create Order Error:', err);
+    return res.status(500).json({
       success: false,
       message: 'Server error while creating order',
-      error: error.message
+      error: err.message
     });
   } finally {
-    session.endSession(); // 👈 END SESSION
+    session.endSession();
   }
 };
 

@@ -291,3 +291,36 @@ export const getInventoryAnalytics = asyncHandler(async (req, res) => {
     });
   }
 });
+
+/**
+ * @desc    Public: Get inventory for a specific retailer
+ * @route   GET /api/inventory/retailer/:retailerId
+ * @access  Public (For customers)
+ */
+export const getInventoryForCustomer = asyncHandler(async (req, res) => {
+  try {
+    const { retailerId } = req.params;
+
+    if (!retailerId) {
+      return res.status(400).json({
+        success: false,
+        message: "Retailer ID is required",
+      });
+    }
+
+    const result = await InventoryService.getRetailerInventory(retailerId, req.query);
+
+    return res.json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    console.error("Get customer inventory error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch retailer inventory",
+      error: error.message
+    });
+  }
+});

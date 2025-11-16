@@ -1,6 +1,8 @@
 // J:\dairy9 backend\Dairy9-Backend\routes\inventory.routes.js
+
 import express from 'express';
 import auth from '../middlewares/auth.js';
+
 import {
   getRetailerInventory,
   addProductToInventory,
@@ -8,15 +10,23 @@ import {
   getLowStockAlerts,
   getInventoryLogs,
   updateInventoryItem,
-  getInventoryAnalytics
+  getInventoryAnalytics,
+  getInventoryForCustomer
 } from '../controllers/inventory.controller.js';
 
 const router = express.Router();
 
-// All routes require authentication
+/* ----------------------------------------------
+   PUBLIC (NO AUTH) — CUSTOMER CAN VIEW RETAILER INVENTORY
+------------------------------------------------*/
+router.get("/retailer/:retailerId", getInventoryForCustomer);
+
+/* ----------------------------------------------
+   PROTECTED ROUTES (RETAILER ONLY)
+------------------------------------------------*/
 router.use(auth);
 
-// Middleware to ensure user is a retailer
+// ⚠️ FIX — Define middleware BEFORE using it
 const requireRetailer = (req, res, next) => {
   if (req.user.role !== 'retailer' && req.user.role !== 'admin') {
     return res.status(403).json({
@@ -27,16 +37,19 @@ const requireRetailer = (req, res, next) => {
   next();
 };
 
-// Apply retailer middleware to all routes
 router.use(requireRetailer);
 
-// Inventory management routes
+/* ----------------------------------------------
+   RETAILER INVENTORY MANAGEMENT ROUTES
+------------------------------------------------*/
 router.get('/', getRetailerInventory);
 router.post('/products', addProductToInventory);
 router.put('/stock', updateInventoryStock);
 router.put('/products/:inventoryId', updateInventoryItem);
 
-// Reporting and analytics routes
+/* ----------------------------------------------
+   REPORTING & ANALYTICS
+------------------------------------------------*/
 router.get('/alerts/low-stock', getLowStockAlerts);
 router.get('/logs', getInventoryLogs);
 router.get('/analytics', getInventoryAnalytics);
