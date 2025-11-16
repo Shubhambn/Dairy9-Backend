@@ -1,4 +1,4 @@
-// services/inventory.service.js
+// services/inventory.service.js - COMPLETE FIXED VERSION
 import RetailerInventory from '../models/retailerInventory.model.js';
 import InventoryLog from '../models/inventoryLog.model.js';
 import Product from '../models/product.model.js';
@@ -86,6 +86,7 @@ class InventoryService {
      */
     async updateStock(params) {
         const session = await mongoose.startSession();
+        let inventoryItemBeforeSave = null;
 
         try {
             session.startTransaction();
@@ -194,6 +195,14 @@ class InventoryService {
                 'Committed:', inventoryItem.committedStock,
                 'Total Sold:', inventoryItem.totalSold);
 
+            // Store data for later use before session ends
+            inventoryItemBeforeSave = {
+                _id: inventoryItem._id,
+                currentStock: inventoryItem.currentStock,
+                committedStock: inventoryItem.committedStock,
+                product: inventoryItem.product
+            };
+
             // Create inventory log
             const inventoryLog = new InventoryLog({
                 retailer: retailerId,
@@ -221,13 +230,16 @@ class InventoryService {
 
             console.log('✅ updateStock completed successfully');
 
+            // ✅ FIX: Session end karne ke baad hi database calls karo
+            const updatedInventoryItem = await RetailerInventory.findById(inventoryItemBeforeSave._id)
+                .populate('product', 'name sku unit unitSize image');
+
             // Invalidate cache after successful update
             await CacheService.invalidateInventoryCache(retailerId);
 
             return {
                 success: true,
-                inventoryItem: await RetailerInventory.findById(inventoryItem._id)
-                    .populate('product', 'name sku unit unitSize image'),
+                inventoryItem: updatedInventoryItem,
                 inventoryLog,
                 stockChange: newStock - previousStock
             };
@@ -237,7 +249,8 @@ class InventoryService {
             console.error('❌ updateStock failed:', error);
             throw error;
         } finally {
-            session.endSession();
+            // ✅ FIX: Session ko end karo transaction complete hone ke baad
+            await session.endSession();
         }
     }
 
@@ -246,6 +259,7 @@ class InventoryService {
      */
     async addProductToInventory(retailerId, productData, userId) {
         const session = await mongoose.startSession();
+        let savedInventoryItemId = null;
 
         try {
             session.startTransaction();
@@ -289,6 +303,7 @@ class InventoryService {
             });
 
             await inventoryItem.save({ session });
+            savedInventoryItemId = inventoryItem._id;
 
             // Create initial stock log if stock is added - WITH VALID REASON
             if (initialStock > 0) {
@@ -309,17 +324,20 @@ class InventoryService {
 
             await session.commitTransaction();
 
+            // ✅ FIX: Session end hone ke baad hi database call karo
+            const result = await RetailerInventory.findById(savedInventoryItemId)
+                .populate('product', 'name sku unit unitSize image category');
+
             // Invalidate cache
             await CacheService.invalidateInventoryCache(retailerId);
 
-            return await RetailerInventory.findById(inventoryItem._id)
-                .populate('product', 'name sku unit unitSize image category');
+            return result;
 
         } catch (error) {
             await session.abortTransaction();
             throw error;
         } finally {
-            session.endSession();
+            await session.endSession();
         }
     }
 
@@ -390,35 +408,22 @@ class InventoryService {
 
             // ✅ FIX: Use unitSize instead of unit for display - sirf numeric quantity dikhao
             const formattedInventory = inventory.map(item => {
-                // Product ka unitSize use karo (e.g., 200) aur unit alag field mein rakh do
                 const productUnitSize = item.product?.unitSize || 0;
                 const currentStock = item.currentStock || 0;
                 const committedStock = item.committedStock || 0;
                 
-                // Agar currentStock already numeric hai toh wahi use karo, nahi toh unitSize use karo
                 const formattedCurrentStock = typeof currentStock === 'number' ? currentStock : productUnitSize;
                 const formattedAvailableStock = formattedCurrentStock - committedStock;
 
-                console.log(`🔄 Formatting: ${item.product?.name}`, {
-                    unitSize: productUnitSize,
-                    currentStock: currentStock,
-                    formattedCurrentStock: formattedCurrentStock,
-                    unit: item.product?.unit
-                });
-
                 return {
                     ...item,
-                    // ✅ Sirf numeric values return karo
                     currentStock: formattedCurrentStock,
                     availableStock: formattedAvailableStock,
-                    // Unit alag field mein rahega agar kabhi display karna ho
                     displayUnit: item.product?.unit || '',
-                    // Original product data bhi rahega
                     product: {
                         ...item.product,
-                        // Product level par bhi unitSize hi dikhao
                         displayQuantity: productUnitSize,
-                        unit: item.product?.unit || '' // Unit alag se available hai
+                        unit: item.product?.unit || ''
                     }
                 };
             });
@@ -429,46 +434,35 @@ class InventoryService {
             let lowStockCount = 0;
             let outOfStockCount = 0;
 
-            console.log('🧮 Calculating inventory values...');
-            
             formattedInventory.forEach(item => {
-                // CORRECTED: Calculate inventory value (current stock × SELLING PRICE)
                 const itemCurrentStock = item.currentStock || 0;
                 const itemSellingPrice = item.sellingPrice || 0;
                 const itemInventoryValue = itemCurrentStock * itemSellingPrice;
                 totalInventoryValue += itemInventoryValue;
 
-                // Calculate sales value (total sold × selling price)
                 const itemTotalSold = item.totalSold || 0;
                 const itemSalesValue = itemTotalSold * itemSellingPrice;
                 totalSalesValue += itemSalesValue;
 
-                // Calculate low stock count
                 const availableStock = itemCurrentStock - (item.committedStock || 0);
                 if (availableStock <= (item.minStockLevel || 0)) {
                     lowStockCount++;
                 }
 
-                // Calculate out of stock count
                 if (availableStock === 0) {
                     outOfStockCount++;
                 }
-
-                // DEBUG: Log individual product calculations
-                console.log(`📊 ${item.productName || item.product?.name}:`);
-                console.log(`   Stock: ${itemCurrentStock} × Price: ₹${itemSellingPrice} = ₹${itemInventoryValue}`);
-                console.log(`   Sold: ${itemTotalSold} × Price: ₹${itemSellingPrice} = ₹${itemSalesValue}`);
             });
 
             const result = {
                 inventory: formattedInventory,
                 summary: {
                     totalProducts: formattedInventory.length,
-                    totalInventoryValue, // Total value of all current stock × SELLING PRICE
-                    totalSalesValue,     // Total value of all sales × SELLING PRICE
+                    totalInventoryValue,
+                    totalSalesValue,
                     lowStockCount,
                     outOfStockCount,
-                    totalValue: totalInventoryValue // Backward compatibility
+                    totalValue: totalInventoryValue
                 },
                 pagination: {
                     currentPage: parseInt(page),
@@ -477,14 +471,6 @@ class InventoryService {
                     itemsPerPage: parseInt(limit)
                 }
             };
-
-            console.log('🎯 FINAL Inventory Summary:', {
-                totalProducts: result.summary.totalProducts,
-                totalInventoryValue: result.summary.totalInventoryValue,
-                totalSalesValue: result.summary.totalSalesValue,
-                lowStockCount: result.summary.lowStockCount,
-                outOfStockCount: result.summary.outOfStockCount
-            });
 
             // Cache the result
             await CacheService.setInventoryCache(retailerId, result, filters);
@@ -498,7 +484,7 @@ class InventoryService {
     }
 
     /**
-     * Get low stock alerts for retailer
+     * Get low stock alerts for retailer - ✅ FIXED: Now properly defined
      */
     async getLowStockAlerts(retailerId, threshold = 0.2) {
         try {
@@ -533,7 +519,7 @@ class InventoryService {
     }
 
     /**
-     * Get inventory logs for retailer
+     * Get inventory logs for retailer - ✅ FIXED: Now properly defined
      */
     async getInventoryLogs(retailerId, filters = {}) {
         try {
@@ -589,10 +575,11 @@ class InventoryService {
     }
 
     /**
-     * Update inventory item settings
+     * Update inventory item settings - FIXED WITH VALID REASON VALUES & SESSION
      */
     async updateInventoryItem(inventoryId, retailerId, updateData, userId) {
         const session = await mongoose.startSession();
+        let savedInventoryItemId = null;
 
         try {
             session.startTransaction();
@@ -619,9 +606,21 @@ class InventoryService {
             });
 
             await inventoryItem.save({ session });
+            savedInventoryItemId = inventoryItem._id;
 
-            // Create log for significant changes
+            // Create log for price changes - USE VALID REASON VALUES
             if (updateData.sellingPrice !== undefined || updateData.costPrice !== undefined) {
+                let reason = 'CORRECTION';
+                let notes = 'Price settings updated';
+                
+                if (updateData.sellingPrice !== undefined && updateData.costPrice !== undefined) {
+                    notes = `Selling price updated to ${updateData.sellingPrice}, Cost price updated to ${updateData.costPrice}`;
+                } else if (updateData.sellingPrice !== undefined) {
+                    notes = `Selling price updated to ${updateData.sellingPrice}`;
+                } else if (updateData.costPrice !== undefined) {
+                    notes = `Cost price updated to ${updateData.costPrice}`;
+                }
+
                 const inventoryLog = new InventoryLog({
                     retailer: retailerId,
                     product: inventoryItem.product,
@@ -630,8 +629,25 @@ class InventoryService {
                     quantity: 0,
                     previousStock: inventoryItem.currentStock,
                     newStock: inventoryItem.currentStock,
-                    reason: 'ADJUSTMENT',
-                    notes: 'Price/settings update',
+                    reason: reason,
+                    notes: notes,
+                    createdBy: userId
+                });
+                await inventoryLog.save({ session });
+            }
+
+            // Create log for stock level adjustments
+            if (updateData.minStockLevel !== undefined || updateData.maxStockLevel !== undefined) {
+                const inventoryLog = new InventoryLog({
+                    retailer: retailerId,
+                    product: inventoryItem.product,
+                    inventoryItem: inventoryItem._id,
+                    transactionType: 'STOCK_ADJUSTMENT',
+                    quantity: 0,
+                    previousStock: inventoryItem.currentStock,
+                    newStock: inventoryItem.currentStock,
+                    reason: 'SYSTEM_ADJUSTMENT',
+                    notes: 'Stock level settings updated',
                     createdBy: userId
                 });
                 await inventoryLog.save({ session });
@@ -639,22 +655,25 @@ class InventoryService {
 
             await session.commitTransaction();
 
+            // ✅ FIX: Session end hone ke baad hi database call karo
+            const result = await RetailerInventory.findById(savedInventoryItemId)
+                .populate('product', 'name sku unit unitSize image');
+
             // Invalidate cache
             await CacheService.invalidateInventoryCache(retailerId);
 
-            return await RetailerInventory.findById(inventoryItem._id)
-                .populate('product', 'name sku unit unitSize image');
+            return result;
 
         } catch (error) {
             await session.abortTransaction();
             throw error;
         } finally {
-            session.endSession();
+            await session.endSession();
         }
     }
 
     /**
-     * Reserve stock for order
+     * Reserve stock for order - FIXED SESSION ISSUE
      */
     async reserveStockForOrder(orderId, retailerId, items, userId) {
         const session = await mongoose.startSession();
@@ -707,6 +726,8 @@ class InventoryService {
             }
 
             await session.commitTransaction();
+            
+            // ✅ FIX: Session end karne ke baad hi cache invalidate karo
             await CacheService.invalidateInventoryCache(retailerId);
 
             return {
@@ -718,7 +739,7 @@ class InventoryService {
             await session.abortTransaction();
             throw err;
         } finally {
-            session.endSession();
+            await session.endSession();
         }
     }
 
@@ -859,7 +880,7 @@ class InventoryService {
                     quantity: log.quantity,
                     previousStock: inventory.currentStock,
                     newStock: inventory.currentStock,
-                    reason,
+                    reason: reason,
                     referenceType: 'ORDER',
                     referenceId: orderId,
                     notes: `Cancelled order ${orderId} - stock released`,
@@ -1072,6 +1093,20 @@ class InventoryService {
             throw error;
         }
     }
+
+    /**
+     * Helper method to get valid reason values for debugging
+     */
+    async getValidReasonValues() {
+        try {
+            const reasonPath = InventoryLog.schema.path('reason');
+            return reasonPath.enumValues;
+        } catch (error) {
+            console.error('Error getting valid reasons:', error);
+            return [];
+        }
+    }
 }
 
+// ✅ IMPORTANT: Export as default instance
 export default new InventoryService();

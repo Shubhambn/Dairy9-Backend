@@ -46,10 +46,10 @@ export const generateInvoice = async (req, res) => {
       margin: 50,
       info: {
         Title: `Invoice - ${order.orderId}`,
-        Author: 'Dairy 9',
+        Author: 'Dairy Nine Foods',
         Subject: 'Order Invoice',
         Keywords: 'invoice, order, dairy, receipt',
-        Creator: 'Dairy 9 System',
+        Creator: 'Dairy Nine Foods System',
         CreationDate: new Date()
       }
     });
@@ -62,368 +62,129 @@ export const generateInvoice = async (req, res) => {
     // Pipe the PDF to the response
     doc.pipe(res);
 
-    // Add professional diagonal watermark
-    const addWatermark = () => {
-      doc.save();
-      
-      // Set watermark properties
-      const watermarkText = 'DAIRY 9';
-      const watermarkOpacity = 0.05; // Increased opacity for better visibility on larger page
-      const rotationAngle = -30; // Diagonal angle
-      const fontSize = 150; // Larger font size for A4 page
-      
-      // Calculate center position
-      const centerX = doc.page.width / 2;
-      const centerY = doc.page.height / 2;
-      
-      doc.fillColor('black')
-         .font('Helvetica-Bold')
-         .fontSize(fontSize)
-         .opacity(watermarkOpacity)
-         .rotate(rotationAngle, { origin: [centerX, centerY] })
-         .text(watermarkText, centerX - 200, centerY - 30, {
-           align: 'center',
-           width: 400
-         })
-         .rotate(-rotationAngle, { origin: [centerX, centerY] });
-      
-      doc.restore();
-    };
+    // Simple layout matching the image exactly
+    const pageWidth = doc.page.width - 100; // 50px margins on both sides
 
-    // Call watermark on every page
-    doc.on('pageAdded', () => {
-      addWatermark();
-    });
-
-    // Add watermark to first page
-    addWatermark();
-
-    // Professional Header with proper logo handling
-    const headerTop = 50;
-
-    // Company logo with proper aspect ratio
-    const logoPath = path.join(__dirname, '../assets/images/logo.jpeg');
-    if (fs.existsSync(logoPath)) {
-      // Maintain original aspect ratio - larger size for better visibility
-      const logoWidth = 150;
-      const logoHeight = 150;
-
-      doc.image(logoPath, 50, headerTop, {
-        width: logoWidth,
-        height: logoHeight,
-        fit: [logoWidth, logoHeight],
-        align: 'left',
-        valign: 'top'
-      });
-
-      // Company info positioned below the logo with proper spacing
-      doc.fillColor('#87CEEB')
-         .fontSize(32)
-         .font('Courier-Bold')
-         .text('DAIRY 9', 220, headerTop + 25);
-
-      doc.fillColor('#666666')
-         .fontSize(10)
-         .font('Helvetica')
-         .text('Fresh Dairy Products Delivered Daily', 200, headerTop + 55)
-         .text('123 Dairy Lane, Milk City, MC 12345', 200, headerTop + 70)
-         .text('Phone: +1 (555) 123-4567 | Email: info@dairy9.com', 200, headerTop + 85);
-    } else {
-      // Fallback if logo doesn't exist
-      doc.fillColor('#87CEEB')
-         .fontSize(28)
-         .font('Courier-Bold')
-         .text('DAIRY 9', 50, headerTop);
-
-      doc.fillColor('#666666')
-         .fontSize(10)
-         .font('Helvetica')
-         .text('Fresh Dairy Products Delivered Daily', 50, headerTop + 35)
-         .text('123 Dairy Lane, Milk City, MC 12345', 50, headerTop + 50)
-         .text('Phone: +1 (555) 123-4567 | Email: info@dairy9.com', 50, headerTop + 65);
-    }
-
-    // Invoice title section - properly spaced below header
-    const invoiceTop = headerTop + 140;
-    doc.fillColor('#333333')
-       .fontSize(28)
+    // Header Section - Top Left
+    doc.fontSize(20)
        .font('Helvetica-Bold')
-       .text('INVOICE', 0, invoiceTop, { align: 'center' });
-    
-    doc.fillColor('#2E8B57')
-       .fontSize(12)
-       .font('Helvetica-Oblique')
-       .text('Order Confirmation & Invoice', 0, invoiceTop + 35, { align: 'center' });
+       .fillColor('black')
+       .text('INVOICE', 50, 50, { continued: true })
+       .text(`    ${order.orderId}`, { continued: true })
+       .text(`    ${new Date(order.createdAt).toLocaleDateString('en-GB')}`, { width: pageWidth });
 
-    // Separator line
-    doc.moveTo(50, invoiceTop + 60)
-       .lineTo(545, invoiceTop + 60)
-       .lineWidth(1)
-       .strokeColor('#2E8B57')
+    // Company Information - Simple format
+    doc.fontSize(12)
+       .font('Helvetica')
+       .text("Dairy Nine Food's..", 50, 90)
+       .fontSize(10)
+       .text('Urulikanchan', 50, 110)
+       .text('Pune', 50, 125)
+       .text('412202', 50, 140)
+       .text('Contact:', 50, 155)
+       .text('9552524301 /', 50, 170)
+       .text('9552524306', 50, 185);
+
+    // Customer Information
+    doc.fontSize(10)
+       .text('TO,', 300, 110)
+       .font('Helvetica-Bold')
+       .text(order.customer?.personalInfo?.fullName || 'Customer', 300, 125)
+       .font('Helvetica')
+       .text(`Contact: ${order.customer?.personalInfo?.phone || 'N/A'}`, 300, 140);
+
+    // Table Header
+    const tableTop = 220;
+    const col1 = 50;   // Items
+    const col2 = 350;  // Rate
+    const col3 = 420;  // Quantity
+    const col4 = 480;  // Amount
+
+    // Draw table lines
+    doc.moveTo(50, tableTop)
+       .lineTo(545, tableTop)
        .stroke();
 
-    // Invoice details section - Two column layout with better spacing
-    const detailsTop = invoiceTop + 90;
-
-    // Left column - Invoice Details
-    doc.fillColor('#333333')
-       .fontSize(11)
+    // Table headers
+    doc.fontSize(10)
        .font('Helvetica-Bold')
-       .text('INVOICE DETAILS', 50, detailsTop);
+       .text('Items', col1, tableTop + 10)
+       .text('Rate', col2, tableTop + 10)
+       .text('Quantity', col3, tableTop + 10)
+       .text('Amount', col4, tableTop + 10);
 
-    doc.fillColor('#666666')
-       .fontSize(10)
-       .font('Helvetica')
-       .text(`Invoice Number: ${order.orderId}`, 50, detailsTop + 20, { width: 240 })
-       .text(`Invoice Date: ${new Date(order.createdAt).toLocaleDateString('en-IN', {
-         year: 'numeric',
-         month: 'long',
-         day: 'numeric'
-       })}`, 50, detailsTop + 35, { width: 240 })
-       .text(`Delivery Date: ${new Date(order.deliveryDate).toLocaleDateString('en-IN', {
-         year: 'numeric',
-         month: 'long',
-         day: 'numeric'
-       })}`, 50, detailsTop + 50, { width: 240 });
-
-    // Right column - Order Status
-    doc.fillColor('#333333')
-       .fontSize(11)
-       .font('Helvetica-Bold')
-       .text('ORDER STATUS', 320, detailsTop);
-
-    const statusColor = order.orderStatus === 'delivered' ? '#4CAF50' :
-                       order.orderStatus === 'cancelled' ? '#F44336' : '#FF9800';
-
-    doc.fillColor(statusColor)
-       .fontSize(10)
-       .font('Helvetica-Bold')
-       .text(order.orderStatus.toUpperCase(), 320, detailsTop + 20, { width: 200 });
-
-    doc.fillColor('#666666')
-       .fontSize(10)
-       .font('Helvetica')
-       .text(`Payment: ${order.paymentStatus.charAt(0).toUpperCase() + order.paymentStatus.slice(1)}`, 320, detailsTop + 35, { width: 200 })
-       .text(`Method: ${order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)}`, 320, detailsTop + 50, { width: 200 });
-
-    // Customer information section
-    const customerTop = detailsTop + 90;
-
-    doc.fillColor('#333333')
-       .fontSize(11)
-       .font('Helvetica-Bold')
-       .text('BILL TO', 50, customerTop);
-
-    // Customer info box - wider for better spacing
-    doc.rect(50, customerTop + 15, 245, 70)
-       .fillColor('#F8F9FA')
-       .fill()
-       .strokeColor('#E0E0E0')
+    doc.moveTo(50, tableTop + 30)
+       .lineTo(545, tableTop + 30)
        .stroke();
-
-    doc.fillColor('#333333')
-       .fontSize(10)
-       .font('Helvetica-Bold')
-       .text(order.customer?.personalInfo?.fullName || 'Customer', 60, customerTop + 25, { width: 225 });
-
-    doc.fillColor('#666666')
-       .fontSize(9)
-       .font('Helvetica')
-       .text(`Phone: ${order.customer?.personalInfo?.phone || 'N/A'}`, 60, customerTop + 40, { width: 225 });
-
-    if (order.customer?.personalInfo?.email) {
-      doc.text(`Email: ${order.customer.personalInfo.email}`, 60, customerTop + 52, { width: 225 });
-    }
-
-    // Delivery address section
-    doc.fillColor('#333333')
-       .fontSize(11)
-       .font('Helvetica-Bold')
-       .text('DELIVERY ADDRESS', 305, customerTop);
-    
-    // Address box
-    doc.rect(305, customerTop + 15, 240, 70)
-       .fillColor('#F8F9FA')
-       .fill()
-       .strokeColor('#E0E0E0')
-       .stroke();
-    
-    if (order.deliveryAddress) {
-      const addr = order.deliveryAddress;
-      doc.fillColor('#666666')
-         .fontSize(9)
-         .font('Helvetica')
-         .text(addr.addressLine1 || '', 315, customerTop + 25, { width: 220 })
-         .text(addr.addressLine2 || '', 315, customerTop + 37, { width: 220 })
-         .text(`${addr.city || ''}, ${addr.state || ''} - ${addr.pincode || ''}`, 315, customerTop + 49);
-      
-      if (addr.landmark) {
-        doc.text(`Landmark: ${addr.landmark}`, 315, customerTop + 61);
-      }
-    } else {
-      doc.fillColor('#999999')
-         .fontSize(9)
-         .font('Helvetica-Oblique')
-         .text('Address not provided', 315, customerTop + 35);
-    }
-
-    // Order items table
-    const tableTop = customerTop + 120;
-    
-    // Table header
-    doc.rect(50, tableTop, 495, 20)
-       .fillColor('#2E8B57')
-       .fill();
-    
-    doc.fillColor('white')
-       .fontSize(10)
-       .font('Helvetica-Bold')
-       .text('PRODUCT', 60, tableTop + 6)
-       .text('QUANTITY', 300, tableTop + 6, { width: 60, align: 'center' })
-       .text('UNIT PRICE', 370, tableTop + 6, { width: 70, align: 'right' })
-       .text('TOTAL', 450, tableTop + 6, { width: 80, align: 'right' });
 
     // Table rows
-    let currentY = tableTop + 25;
-    order.items.forEach((item, index) => {
-      // Alternate row colors
-      if (index % 2 === 0) {
-        doc.rect(50, currentY - 5, 495, 20)
-           .fillColor('#F8F9FA')
-           .fill();
-      }
+    let currentY = tableTop + 40;
+    let totalQuantity = 0;
+    let totalAmount = 0;
 
+    order.items.forEach((item) => {
       const productName = item.product?.name || 'Product';
-      const quantity = `${item.quantity} ${item.unit || 'unit'}`;
-      const unitPrice = `₹${item.price.toFixed(2)}`;
-      const total = `₹${(item.quantity * item.price).toFixed(2)}`;
+      const rate = item.price;
+      const quantity = item.quantity;
+      const amount = rate * quantity;
 
-      doc.fillColor('#333333')
-         .fontSize(9)
+      totalQuantity += quantity;
+      totalAmount += amount;
+
+      doc.fontSize(10)
          .font('Helvetica')
-         .text(productName, 60, currentY, { width: 220 })
-         .text(quantity, 300, currentY, { width: 60, align: 'center' })
-         .text(unitPrice, 370, currentY, { width: 70, align: 'right' })
-         .text(total, 450, currentY, { width: 80, align: 'right' });
+         .text(productName, col1, currentY, { width: 280 })
+         .text(`₹ ${rate.toFixed(2)}`, col2, currentY)
+         .text(quantity.toFixed(2), col3, currentY)
+         .text(`₹ ${amount.toFixed(2)}`, col4, currentY);
 
       currentY += 20;
     });
 
-    // Table bottom border
-    doc.rect(50, currentY - 5, 495, 1)
-       .fillColor('#E0E0E0')
-       .fill();
-
-    // Totals section
-    const totalsTop = currentY + 20;
-    const subtotal = order.totalAmount;
-    const discount = order.discount || 0;
-    const finalTotal = order.finalAmount;
-
-    // Totals box
-    doc.rect(345, totalsTop, 200, discount > 0 ? 60 : 45)
-       .fillColor('#F8F9FA')
-       .fill()
-       .strokeColor('#E0E0E0')
+    // Total row
+    doc.moveTo(50, currentY + 10)
+       .lineTo(545, currentY + 10)
        .stroke();
 
-    doc.fillColor('#666666')
-       .fontSize(10)
+    doc.fontSize(10)
        .font('Helvetica')
-       .text('Subtotal:', 355, totalsTop + 12)
-       .text(`₹${subtotal.toFixed(2)}`, 495, totalsTop + 12, { align: 'right', width: 90 });
+       .text('', col1, currentY + 20)
+       .text('', col2, currentY + 20)
+       .text(totalQuantity.toFixed(2), col3, currentY + 20)
+       .text(`₹ ${totalAmount.toFixed(2)}`, col4, currentY + 20);
 
-    if (discount > 0) {
-      doc.text('Discount:', 355, totalsTop + 27)
-         .text(`-₹${discount.toFixed(2)}`, 495, totalsTop + 27, { align: 'right', width: 90 });
-
-      // Separator line
-      doc.moveTo(355, totalsTop + 40)
-         .lineTo(525, totalsTop + 40)
-         .strokeColor('#CCCCCC')
-         .stroke();
-
-      doc.fillColor('#333333')
-         .fontSize(12)
-         .font('Helvetica-Bold')
-         .text('Total Amount:', 355, totalsTop + 47)
-         .text(`₹${finalTotal.toFixed(2)}`, 495, totalsTop + 47, { align: 'right', width: 90 });
-    } else {
-      // Separator line
-      doc.moveTo(355, totalsTop + 25)
-         .lineTo(525, totalsTop + 25)
-         .strokeColor('#CCCCCC')
-         .stroke();
-
-      doc.fillColor('#333333')
-         .fontSize(12)
-         .font('Helvetica-Bold')
-         .text('Total Amount:', 355, totalsTop + 32)
-         .text(`₹${finalTotal.toFixed(2)}`, 495, totalsTop + 32, { align: 'right', width: 90 });
-    }
-
-    // Additional information section
-    const notesTop = totalsTop + (discount > 0 ? 80 : 65);
+    // TOTAL section
+    const totalSectionY = currentY + 50;
     
-    if (order.specialInstructions) {
-      doc.fillColor('#333333')
-         .fontSize(11)
-         .font('Helvetica-Bold')
-         .text('SPECIAL INSTRUCTIONS', 50, notesTop);
-      
-      doc.rect(50, notesTop + 15, 495, 40)
-         .fillColor('#FFFBF0')
-         .fill()
-         .strokeColor('#FFEBB2')
-         .stroke();
-      
-      doc.fillColor('#666666')
-         .fontSize(9)
-         .font('Helvetica')
-         .text(order.specialInstructions, 60, notesTop + 25, { width: 475 });
-    }
-
-    // Footer section
-    const footerTop = doc.page.height - 100;
-    
-    // Footer separator
-    doc.moveTo(50, footerTop)
-       .lineTo(545, footerTop)
-       .strokeColor('#2E8B57')
-       .stroke();
-
-    // Footer content - center aligned greeting message
-    doc.fillColor('#666666')
-       .fontSize(10)
+    doc.fontSize(10)
        .font('Helvetica-Bold')
-       .text('Thank you for choosing Dairy 9!', 0, footerTop + 15, { align: 'center' });
+       .text('TOTAL', col1, totalSectionY)
+       .text(`₹ ${totalAmount.toFixed(2)}`, col4, totalSectionY);
 
-    doc.fillColor('#666666')
-       .fontSize(8)
+    // Amount in words
+    const amountInWords = convertToWords(totalAmount);
+    doc.fontSize(10)
        .font('Helvetica')
-       .text('For any queries regarding this invoice, please contact our support team.', 0, footerTop + 30, { align: 'center' })
-       .text('Email: support@dairy9.com | Phone: +1 (555) 123-4567', 0, footerTop + 43, { align: 'center' })
-       .text(`Invoice generated on ${new Date().toLocaleDateString('en-IN')} at ${new Date().toLocaleTimeString('en-IN', {
-         hour: '2-digit',
-         minute: '2-digit'
-       })}`, 0, footerTop + 56, { align: 'center' })
-       .text('Fresh Dairy Products Delivered Daily', 0, footerTop + 69, { align: 'center' });
+       .text('Amount in words', col1, totalSectionY + 25)
+       .text(`₹ ${amountInWords}`, col1, totalSectionY + 40, { width: 400 });
 
-    // Terms and conditions (if space permits)
-    if (doc.y < footerTop - 50) {
-      doc.moveDown(2);
-      doc.fillColor('#333333')
-         .fontSize(9)
-         .font('Helvetica-Bold')
-         .text('Terms & Conditions:', 50, doc.y);
-      
-      doc.fillColor('#666666')
-         .fontSize(8)
-         .font('Helvetica')
-         .text('• Prices are inclusive of all applicable taxes', 50, doc.y + 12, { width: 495 })
-         .text('• Goods once sold will not be taken back or exchanged', 50, doc.y + 24, { width: 495 })
-         .text('• Payment due upon receipt of invoice', 50, doc.y + 36, { width: 495 });
-    }
+    // Current Balance (if available in order model)
+    const currentBalance = order.currentBalance || 33283.00; // Default fallback
+    doc.text(`Current Balance`, col1, totalSectionY + 65)
+       .text(`${currentBalance.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, col4, totalSectionY + 65);
+
+    // Footer - Company name and signature
+    const footerY = totalSectionY + 100;
+    
+    doc.fontSize(12)
+       .text("Dairy Nine Food's..", 50, footerY);
+
+    doc.fontSize(10)
+       .text('Authorized Signatory', 50, footerY + 40);
+
+    // Simple border around entire content
+    doc.rect(45, 45, 505, footerY + 80)
+       .stroke();
 
     // Finalize the PDF
     doc.end();
@@ -437,3 +198,57 @@ export const generateInvoice = async (req, res) => {
     });
   }
 };
+
+// Helper function to convert numbers to words (Indian numbering system)
+function convertToWords(num) {
+  const ones = ['', 'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT', 'NINE', 'TEN',
+    'ELEVEN', 'TWELVE', 'THIRTEEN', 'FOURTEEN', 'FIFTEEN', 'SIXTEEN', 'SEVENTEEN', 'EIGHTEEN', 'NINETEEN'];
+  
+  const tens = ['', '', 'TWENTY', 'THIRTY', 'FORTY', 'FIFTY', 'SIXTY', 'SEVENTY', 'EIGHTY', 'NINETY'];
+  
+  function convertLessThanThousand(n) {
+    if (n === 0) return '';
+    
+    if (n < 20) {
+      return ones[n];
+    }
+    
+    if (n < 100) {
+      return tens[Math.floor(n / 10)] + (n % 10 !== 0 ? ' ' + ones[n % 10] : '');
+    }
+    
+    return ones[Math.floor(n / 100)] + ' HUNDRED' + (n % 100 !== 0 ? ' AND ' + convertLessThanThousand(n % 100) : '');
+  }
+  
+  if (num === 0) return 'ZERO';
+  
+  let result = '';
+  const integerPart = Math.floor(num);
+  
+  if (integerPart >= 10000000) {
+    result += convertLessThanThousand(Math.floor(integerPart / 10000000)) + ' CRORE ';
+    num %= 10000000;
+  }
+  
+  if (integerPart >= 100000) {
+    result += convertLessThanThousand(Math.floor(integerPart / 100000)) + ' LAKH ';
+    num %= 100000;
+  }
+  
+  if (integerPart >= 1000) {
+    result += convertLessThanThousand(Math.floor(integerPart / 1000)) + ' THOUSAND ';
+    num %= 1000;
+  }
+  
+  if (integerPart > 0) {
+    result += convertLessThanThousand(integerPart);
+  }
+  
+  // Handle decimal part (paise)
+  const decimalPart = Math.round((num - integerPart) * 100);
+  if (decimalPart > 0) {
+    result += ' AND ' + decimalPart + '/100';
+  }
+  
+  return result + ' ONLY';
+}

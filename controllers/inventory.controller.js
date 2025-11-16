@@ -3,9 +3,13 @@ import asyncHandler from 'express-async-handler';
 import { body, validationResult } from 'express-validator';
 import InventoryService from '../services/inventory.service.js';
 import Admin from '../models/admin.model.js';
+import InventoryLog from '../models/inventoryLog.model.js'; // ✅ ADD THIS IMPORT
+import CacheService from '../services/cache.service.js'; // ✅ ADD THIS IMPORT
+
 
 // Validation rules
 // CORRECT VALIDATION MIDDLEWARE - Update this
+// controllers/inventory.controller.js - Update the validation rules
 export const validateStockUpdate = [
   body('productId')
     .isMongoId()
@@ -28,7 +32,9 @@ export const validateStockUpdate = [
       // Commitment Reasons
       'ORDER_RESERVATION', 'ORDER_CANCELLED', 'ORDER_DELIVERED',
       // General Reasons
-      'INITIAL_SETUP', 'CORRECTION', 'PHYSICAL_COUNT', 'SYSTEM_ADJUSTMENT'
+      'INITIAL_SETUP', 'CORRECTION', 'PHYSICAL_COUNT', 'SYSTEM_ADJUSTMENT',
+      // ✅ ADDED: Deletion Reason
+      'DELETION'
     ])
     .withMessage('Valid reason is required')
 ];
@@ -50,6 +56,8 @@ const getRetailerFromUser = async (userId) => {
   }
   return retailer;
 };
+
+
 
 /**
  * @desc    Get retailer inventory
@@ -199,6 +207,158 @@ export const updateInventoryItem = asyncHandler(async (req, res) => {
     res.status(statusCode).json({
       success: false,
       message: error.message
+    });
+  }
+});
+
+
+// Add this import at the top
+import RetailerInventory from '../models/retailerInventory.model.js';
+
+/**
+ * @desc    Delete inventory item
+ * @route   DELETE /api/retailer/inventory/products/:inventoryId
+ * @access  Private (Retailer)
+ */
+export const deleteInventoryItem = asyncHandler(async (req, res) => {
+  try {
+    const { inventoryId } = req.params;
+    const retailer = await getRetailerFromUser(req.user._id);
+
+    console.log('🗑️ Delete inventory request:', { inventoryId, retailerId: retailer._id });
+
+    // Find the inventory item and verify it belongs to this retailer
+    const inventoryItem = await RetailerInventory.findOne({
+      _id: inventoryId,
+      retailer: retailer._id
+    });
+
+    if (!inventoryItem) {
+      return res.status(404).json({
+        success: false,
+        message: 'Inventory item not found or you do not have permission to delete it'
+      });
+    }
+
+    // Check if there's any committed stock (reserved for orders)
+    if (inventoryItem.committedStock > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete inventory item with reserved stock. Please release all reservations first.',
+        committedStock: inventoryItem.committedStock
+      });
+    }
+
+    // Check if there's current stock
+    if (inventoryItem.currentStock > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete inventory item with current stock. Please adjust stock to zero first.',
+        currentStock: inventoryItem.currentStock
+      });
+    }
+
+    // ✅ FIX: Use HARD DELETE instead of soft delete
+    await RetailerInventory.findByIdAndDelete(inventoryId);
+
+    // ✅ FIX: Create a deletion log for audit trail with valid reason
+    await InventoryLog.create({
+      retailer: retailer._id,
+      product: inventoryItem.product,
+      inventoryItem: inventoryItem._id,
+      transactionType: 'STOCK_ADJUSTMENT',
+      quantity: 0,
+      previousStock: inventoryItem.currentStock,
+      newStock: 0,
+      reason: 'DELETION', // This will now work after schema update
+      notes: `Inventory item permanently deleted - Product: ${inventoryItem.productName}`,
+      createdBy: req.user._id
+    });
+
+    console.log('✅ Inventory item HARD DELETED successfully:', inventoryId);
+
+    // ✅ FIX: Invalidate cache to ensure UI updates
+    await CacheService.invalidateInventoryCache(retailer._id);
+
+    res.json({
+      success: true,
+      message: 'Inventory item permanently deleted successfully',
+      data: {
+        _id: inventoryItem._id,
+        productName: inventoryItem.productName,
+        deletedAt: new Date()
+      }
+    });
+
+  } catch (error) {
+    console.error('Delete inventory item error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete inventory item',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @desc    Force delete inventory item (admin/superuser only)
+ * @route   DELETE /api/retailer/inventory/products/:inventoryId/force
+ * @access  Private (Admin/Retailer)
+ */
+export const forceDeleteInventoryItem = asyncHandler(async (req, res) => {
+  try {
+    const { inventoryId } = req.params;
+    const retailer = await getRetailerFromUser(req.user._id);
+
+    console.log('⚠️ Force delete inventory request:', { inventoryId, retailerId: retailer._id });
+
+    // Find the inventory item
+    const inventoryItem = await RetailerInventory.findOne({
+      _id: inventoryId,
+      retailer: retailer._id
+    });
+
+    if (!inventoryItem) {
+      return res.status(404).json({
+        success: false,
+        message: 'Inventory item not found'
+      });
+    }
+
+    // Create a log before deletion
+    await InventoryLog.create({
+      retailer: retailer._id,
+      product: inventoryItem.product,
+      inventoryItem: inventoryItem._id,
+      transactionType: 'STOCK_ADJUSTMENT',
+      quantity: 0,
+      previousStock: inventoryItem.currentStock,
+      newStock: 0,
+      reason: 'DELETION',
+      notes: `Inventory item deleted - Product: ${inventoryItem.productName}`,
+      createdBy: req.user._id
+    });
+
+    // Hard delete
+    await RetailerInventory.findByIdAndDelete(inventoryId);
+
+    console.log('✅ Inventory item force deleted:', inventoryId);
+
+    res.json({
+      success: true,
+      message: 'Inventory item permanently deleted',
+      data: {
+        _id: inventoryId,
+        productName: inventoryItem.productName
+      }
+    });
+
+  } catch (error) {
+    console.error('Force delete inventory item error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to force delete inventory item',
+      error: error.message
     });
   }
 });

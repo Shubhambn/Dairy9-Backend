@@ -6,6 +6,7 @@ import Product from '../models/product.model.js';
 import Admin from '../models/admin.model.js';
 import { getClosestRetailer, validateCoordinates, calculateDistance } from '../utils/locationUtils.js';
 import inventoryService from '../services/inventory.service.js';
+import RetailerInventory from '../models/retailerInventory.model.js';
 
 // Generate unique order ID
 const generateOrderId = () => {
@@ -23,23 +24,46 @@ const findOrderById = async (orderIdentifier) => {
 };
 
 // Helper function to get retailer's inventory prices
+// Helper function to get retailer's inventory prices - FIXED VERSION
 const getRetailerInventoryPrices = async (retailerId, authToken) => {
   try {
-    const inventoryResponse = await fetch(`${process.env.EXPO_PUBLIC_API_URL}/api/retailer/inventory`, {
-      headers: { Authorization: authToken }
-    });
+    console.log(`💰 Fetching inventory for retailer: ${retailerId}`);
     
-    if (inventoryResponse.ok) {
-      const inventoryData = await inventoryResponse.json();
-      return inventoryData.data?.inventory || [];
-    }
-    return [];
+    // Direct database query instead of API call to avoid issues
+    const inventoryItems = await RetailerInventory.find({
+      retailer: retailerId,
+      isActive: true
+    })
+    .populate('product', 'name sku price')
+    .lean();
+
+    console.log(`📦 Retrieved ${inventoryItems.length} inventory items directly from DB`);
+    
+    // Format the response to match what the order creation expects
+    const formattedInventory = inventoryItems.map(item => ({
+      _id: item._id,
+      product: {
+        _id: item.product?._id,
+        name: item.product?.name
+      },
+      sellingPrice: item.sellingPrice,
+      currentStock: item.currentStock,
+      committedStock: item.committedStock
+    }));
+
+    return formattedInventory;
   } catch (error) {
-    console.log('⚠️ Could not fetch retailer inventory:', error.message);
+    console.log('❌ Error fetching retailer inventory:', error.message);
     return [];
   }
 };
 
+// @desc    Create new order WITH INVENTORY RESERVATION AND PRICE OVERRIDES
+// @route   POST /api/orders
+// @access  Private
+// @desc    Create new order WITH INVENTORY RESERVATION AND PRICE OVERRIDES
+// @route   POST /api/orders
+// @access  Private
 // @desc    Create new order WITH INVENTORY RESERVATION AND PRICE OVERRIDES
 // @route   POST /api/orders
 // @access  Private
@@ -51,40 +75,15 @@ export const createOrder = async (req, res) => {
 
     const userId = req.user._id;
     const { 
-      items: rawItems, 
-      deliveryAddress: providedAddress, 
+      items, 
+      deliveryAddress, 
       deliveryTime, 
       paymentMethod, 
-      specialInstructions,
-      retailerId: requestedRetailerId,
-      temporary = true
+      specialInstructions 
     } = req.body;
 
-    // basic validation
-    if (!Array.isArray(rawItems) || rawItems.length === 0) {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, message: 'No items provided' });
-    }
-
-    // normalize items and validate quantities
-    const items = rawItems.map(it => ({
-      productId: it.productId || it.product?._id || it.product?.id,
-      quantity: Number(it.quantity) || 0
-    }));
-
-    for (const it of items) {
-      if (!it.productId || it.quantity <= 0) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid product or quantity in items',
-          details: it
-        });
-      }
-    }
-
     // Get customer profile
-    const customer = await Customer.findOne({ user: userId }).session(session);
+    const customer = await Customer.findOne({ user: userId });
     if (!customer) {
       await session.abortTransaction();
       return res.status(404).json({
@@ -93,8 +92,13 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    // choose delivery address (prefer provided, else profile)
-    const addressToUse = providedAddress || customer.deliveryAddress;
+    // Find the closest retailer for order assignment FIRST
+    let assignedRetailer = null;
+    let assignmentDetails = null;
+    
+    // Use provided delivery address or customer's default address
+    const addressToUse = deliveryAddress || customer.deliveryAddress;
+    
     if (!addressToUse) {
       await session.abortTransaction();
       return res.status(400).json({
@@ -103,10 +107,11 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    // coordinates must exist
-    const coords = addressToUse.coordinates;
-    if (!coords || typeof coords.latitude !== 'number' || typeof coords.longitude !== 'number') {
+    let customerLocation = addressToUse.coordinates;
+    
+    if (!customerLocation || !customerLocation.latitude || !customerLocation.longitude) {
       await session.abortTransaction();
+      console.log('Coordinates missing in delivery address');
       return res.status(400).json({
         success: false,
         message: 'Delivery address coordinates are required. Please provide a valid address with location coordinates to place an order.',
@@ -114,84 +119,76 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    if (!validateCoordinates(coords.latitude, coords.longitude)) {
+    // Validate customer coordinates
+    if (!validateCoordinates(customerLocation.latitude, customerLocation.longitude)) {
       await session.abortTransaction();
-      return res.status(400).json({ success: false, message: 'Invalid delivery coordinates' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid delivery address coordinates'
+      });
     }
 
-    // find assigned retailer: priority -> client requested retailerId -> closest retailer within radius
-    let assignedRetailer = null;
-    let assignmentDetails = null;
+    // Get all active retailers
+    const retailers = await Admin.find({ isActive: true });
+    
+    if (retailers.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'No active retailers available at the moment'
+      });
+    }
 
-    if (requestedRetailerId) {
-      assignedRetailer = await Admin.findById(requestedRetailerId).lean();
-      if (!assignedRetailer || !assignedRetailer.isActive) {
-        await session.abortTransaction();
-        return res.status(400).json({ success: false, message: 'Requested retailer not found or inactive' });
-      }
-      assignmentDetails = { retailerName: assignedRetailer.fullName, retailerShop: assignedRetailer.shopName };
-    } else {
-      // fetch active retailers and pick closest
-      const retailers = await Admin.find({ isActive: true }).lean();
-      if (!retailers || retailers.length === 0) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: 'No active retailers available at the moment'
-        });
-      }
-
-      const closest = getClosestRetailer(coords.latitude, coords.longitude, retailers, 100); // radius kms
-      if (!closest || !closest.retailer) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: 'No retailer available within your delivery area. Please try a different address or contact customer support.',
-          suggestion: 'No active retailer found within the service radius for your delivery location.'
-        });
-      }
-      assignedRetailer = closest.retailer;
+    // Find the closest retailer within service radius
+    const closestRetailerInfo = getClosestRetailer(
+      customerLocation.latitude,
+      customerLocation.longitude,
+      retailers,
+      100 // 100km max radius
+    );
+    
+    if (closestRetailerInfo && closestRetailerInfo.retailer) {
+      assignedRetailer = closestRetailerInfo.retailer._id;
       assignmentDetails = {
-        distance: closest.distance,
-        retailerName: closest.retailer.fullName,
-        retailerShop: closest.retailer.shopName,
-        serviceRadius: closest.retailer.serviceRadius
+        distance: closestRetailerInfo.distance,
+        retailerName: closestRetailerInfo.retailer.fullName,
+        retailerShop: closestRetailerInfo.retailer.shopName,
+        serviceRadius: closestRetailerInfo.retailer.serviceRadius
       };
       
-      console.log(`📍 Order assigned to retailer: ${closest.retailer.shopName} (${closest.distance}km away)`);
+      console.log(`📍 Order assigned to retailer: ${closestRetailerInfo.retailer.shopName} (${closestRetailerInfo.distance}km away)`);
+    } else {
+      await session.abortTransaction();
+      console.log('❌ No retailer found within service radius');
+      return res.status(400).json({
+        success: false,
+        message: 'No retailer available within your delivery area. Please try a different address or contact customer support.',
+        suggestion: 'No active retailer found within the service radius for your delivery location.'
+      });
     }
 
     // 🔥 CRITICAL FIX: Get retailer's inventory prices BEFORE processing items
     console.log('💰 Fetching retailer inventory prices for order...');
-    const inventoryItems = await getRetailerInventoryPrices(assignedRetailer._id, req.headers.authorization);
+    const inventoryItems = await getRetailerInventoryPrices(assignedRetailer, req.headers.authorization);
     console.log(`📦 Retrieved ${inventoryItems.length} inventory items for retailer`);
 
-    // Check retailer inventory availability and get seller prices via inventoryService
-    const stockCheck = await inventoryService.checkStockAvailability(assignedRetailer._id, items);
-    if (!stockCheck || !stockCheck.allAvailable) {
-      await session.abortTransaction();
-      return res.status(409).json({
-        success: false,
-        message: 'Currently Some Stocks are not Available at your Location, Try different Location',
-        stockDetails: stockCheck?.items || [],
-        retailer: assignmentDetails.retailerShop
-      });
-    }
+    // Debug: Log inventory items to see what we got
+    inventoryItems.forEach(item => {
+      console.log(`🔍 Inventory Item: ${item.product?.name} - Price: ${item.sellingPrice} - Product ID: ${item.product?._id}`);
+    });
 
-    // Build order items using retailer's overridden prices (fallback to product.price if missing)
+    // Process order items with retailer's overridden prices
     let totalAmount = 0;
     const orderItems = [];
 
-    // create a map from stockCheck items for quick lookups
-    const stockMap = new Map();
-    (stockCheck.items || []).forEach(si => stockMap.set(String(si.productId), si));
-
-    for (const it of items) {
-      // fetch product metadata (name/unit) for richer order line
-      const product = await Product.findById(it.productId).lean();
+    for (const item of items) {
+      const product = await Product.findById(item.productId);
       if (!product) {
         await session.abortTransaction();
-        return res.status(400).json({ success: false, message: `Product not found: ${it.productId}` });
+        return res.status(400).json({
+          success: false,
+          message: `Product not found: ${item.productId}`
+        });
       }
 
       if (!product.isAvailable) {
@@ -202,34 +199,35 @@ export const createOrder = async (req, res) => {
         });
       }
 
-      // 🔥 USE RETAILER'S OVERRIDDEN PRICE
-      const stockInfo = stockMap.get(String(it.productId));
-      let finalPrice = stockInfo?.sellingPrice ?? product.discountedPrice ?? product.price ?? 0;
+      // 🔥 USE RETAILER'S OVERRIDDEN PRICE - FIXED LOGIC
+      let finalPrice = product.price; // Default to catalog price
       let isPriceOverridden = false;
       
-      // Find this product in retailer's inventory for additional validation
+      // Find this product in retailer's inventory - FIXED COMPARISON
       const inventoryItem = inventoryItems.find(inv => {
-        const inventoryProductId = inv.product?._id || inv.product;
-        return inventoryProductId && inventoryProductId.toString() === it.productId.toString();
+        // Handle both populated and non-populated product references
+        const inventoryProductId = inv.product?._id ? inv.product._id.toString() : inv.product?.toString();
+        const itemProductId = item.productId.toString();
+        
+        return inventoryProductId === itemProductId;
       });
 
-      if (inventoryItem && inventoryItem.sellingPrice) {
+      if (inventoryItem && inventoryItem.sellingPrice > 0) {
         finalPrice = inventoryItem.sellingPrice;
         isPriceOverridden = finalPrice !== product.price;
-        console.log(`💰 Price override for ${product.name}: ${product.price} → ${finalPrice} (Overridden: ${isPriceOverridden})`);
+        console.log(`💰 Price override for ${product.name}: Catalog ₹${product.price} → Retailer ₹${finalPrice} (Overridden: ${isPriceOverridden})`);
       } else {
-        console.log(`💰 Using catalog price for ${product.name}: ${finalPrice}`);
+        console.log(`💰 Using catalog price for ${product.name}: ₹${finalPrice} (No override found)`);
       }
 
-      const itemTotal = finalPrice * it.quantity;
+      const itemTotal = finalPrice * item.quantity;
       totalAmount += itemTotal;
 
       orderItems.push({
         product: product._id,
-        productName: product.name,
-        quantity: it.quantity,
+        quantity: item.quantity,
         price: finalPrice, // 🔥 Use overridden price
-        originalPrice: product.price, // Store original price
+        originalPrice: product.price, // Store original catalog price
         isPriceOverridden: isPriceOverridden, // Track override
         priceSource: isPriceOverridden ? 'retailer_inventory' : 'catalog',
         unit: product.unit,
@@ -239,8 +237,21 @@ export const createOrder = async (req, res) => {
     }
 
     console.log(`🧮 Order total calculated: ₹${totalAmount}`);
+    console.log(`📊 Price sources: ${orderItems.filter(item => item.isPriceOverridden).length} overridden, ${orderItems.filter(item => !item.isPriceOverridden).length} catalog`);
 
-    // Create the Order document (inside session)
+    // 👇 CHECK RETAILER INVENTORY AVAILABILITY
+    const stockCheck = await inventoryService.checkStockAvailability(assignedRetailer, items);
+    if (!stockCheck.allAvailable) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Currently Some Stocks are not Available at your Location, Try different Location',
+        stockDetails: stockCheck.items,
+        retailer: assignmentDetails.retailerShop
+      });
+    }
+
+    // Create order
     const order = new Order({
       orderId: generateOrderId(),
       customer: customer._id,
@@ -248,11 +259,11 @@ export const createOrder = async (req, res) => {
       totalAmount,
       finalAmount: totalAmount,
       deliveryAddress: addressToUse,
-      deliveryTime: deliveryTime || customer.preferences?.deliveryTime || null,
+      deliveryTime: deliveryTime || customer.preferences?.deliveryTime,
       paymentMethod: paymentMethod || 'cash',
-      specialInstructions: specialInstructions || '',
+      specialInstructions,
       deliveryDate: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      assignedRetailer: assignedRetailer._id,
+      assignedRetailer,
       assignmentDetails,
       reservationStatus: 'not_reserved',
       orderStatus: 'pending',
@@ -261,81 +272,93 @@ export const createOrder = async (req, res) => {
 
     await order.save({ session });
 
-    // Reserve stock using inventoryService
-    const reservationResult = await inventoryService.reserveStockForOrder(order._id, assignedRetailer._id, items, userId);
+    // 👇 RESERVE STOCK IN RETAILER INVENTORY
+    try {
+      const reservationResult = await inventoryService.reserveStockForOrder(
+        order._id,
+        assignedRetailer,
+        items,
+        req.user._id
+      );
 
-    if (!reservationResult || !reservationResult.success) {
-      // reservation failed -> rollback
+      // Update order with reservation status
+      order.reservationStatus = 'reserved';
+      order.reservationDate = new Date();
+      
+      // Update order items with reservation info
+      order.items.forEach((item, index) => {
+        item.reservedQuantity = items[index].quantity;
+        item.isReserved = true;
+      });
+
+      await order.save({ session });
+      await session.commitTransaction();
+
+      // Populate order for response
+      await order.populate('items.product', 'name image unit');
+      await order.populate('assignedRetailer', 'shopName fullName contactNumber');
+
+      console.log(`✅ Online order created successfully with price overrides`);
+      console.log(`💰 Final order breakdown:`);
+      order.items.forEach(item => {
+        console.log(`   ${item.product.name}: ${item.quantity} × ₹${item.price} = ₹${item.quantity * item.price} (${item.priceSource})`);
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Order created successfully and stock reserved',
+        order: {
+          _id: order._id,
+          orderId: order.orderId,
+          totalAmount: order.totalAmount,
+          finalAmount: order.finalAmount,
+          orderStatus: order.orderStatus,
+          reservationStatus: order.reservationStatus,
+          assignedRetailer: order.assignedRetailer,
+          items: order.items.map(item => ({
+            product: {
+              _id: item.product._id,
+              name: item.product.name,
+              image: item.product.image,
+              unit: item.product.unit
+            },
+            quantity: item.quantity,
+            price: item.price,
+            originalPrice: item.originalPrice,
+            isPriceOverridden: item.isPriceOverridden,
+            priceSource: item.priceSource,
+            unit: item.unit,
+            itemTotal: item.quantity * item.price
+          })),
+          priceSource: order.priceSource
+        },
+        reservationDetails: {
+          reservedItems: reservationResult.reservedItems.length,
+          message: reservationResult.message
+        }
+      });
+
+    } catch (reservationError) {
+      // If reservation fails, delete the order
       await Order.findByIdAndDelete(order._id).session(session);
       await session.abortTransaction();
-      return res.status(409).json({
+      
+      console.error('❌ Stock reservation failed:', reservationError);
+      
+      res.status(400).json({
         success: false,
-        message: 'Failed to reserve stock for order',
-        details: reservationResult?.message || 'Reservation failed'
+        message: 'Order creation failed: Could not reserve stock. ' + reservationError.message,
+        suggestion: 'Please try again or contact customer support.'
       });
     }
 
-    // Update order items with reserved info
-    order.reservationStatus = 'reserved';
-    order.reservationDate = new Date();
-
-    // map reserved quantities from reservation result
-    const reservedMap = new Map();
-    (reservationResult.reservedItems || []).forEach(r => reservedMap.set(String(r.productId), r));
-
-    order.items = order.items.map(li => {
-      const r = reservedMap.get(String(li.product));
-      if (r) {
-        li.reservedQuantity = r.quantity;
-        li.isReserved = true;
-      }
-      return li;
-    });
-
-    await order.save({ session });
-    await session.commitTransaction();
-
-    // populate for response (outside transaction)
-    await order.populate('items.product', 'name image unit').execPopulate?.(); 
-    await order.populate('assignedRetailer', 'shopName fullName contactNumber');
-
-    console.log(`✅ Online order created successfully with price overrides`);
-
-    return res.status(201).json({
-      success: true,
-      message: 'Order created and stock reserved',
-      order: {
-        _id: order._id,
-        orderId: order.orderId,
-        totalAmount: order.totalAmount,
-        finalAmount: order.finalAmount,
-        orderStatus: order.orderStatus,
-        reservationStatus: order.reservationStatus,
-        assignedRetailer: order.assignedRetailer,
-        items: order.items.map(item => ({
-          product: item.product,
-          quantity: item.quantity,
-          price: item.price,
-          originalPrice: item.originalPrice,
-          isPriceOverridden: item.isPriceOverridden,
-          priceSource: item.priceSource,
-          unit: item.unit
-        })),
-        priceSource: order.priceSource
-      },
-      reservationSummary: {
-        reservedCount: reservationResult.reservedItems.length,
-        message: reservationResult.message
-      }
-    });
-
-  } catch (err) {
+  } catch (error) {
     await session.abortTransaction();
-    console.error('❌ Create Order Error:', err);
-    return res.status(500).json({
+    console.error('❌ Create Order Error:', error);
+    res.status(500).json({
       success: false,
       message: 'Server error while creating order',
-      error: err.message
+      error: error.message
     });
   } finally {
     session.endSession();
@@ -378,6 +401,11 @@ export const createOfflineOrder = async (req, res) => {
     const inventoryItems = await getRetailerInventoryPrices(retailer._id, req.headers.authorization);
     console.log(`📦 Retrieved ${inventoryItems.length} inventory items for offline order`);
 
+    // Debug: Log inventory items to see what we got
+    inventoryItems.forEach(item => {
+      console.log(`🔍 Inventory Item: ${item.product?.name} - Price: ${item.sellingPrice} - Product ID: ${item.product?._id}`);
+    });
+
     // Validate items and calculate total with OVERRIDDEN PRICES
     let calculatedTotal = 0;
     let calculatedSubtotal = 0;
@@ -401,21 +429,25 @@ export const createOfflineOrder = async (req, res) => {
         });
       }
 
-      // 🔥 CRITICAL FIX: Find retailer's overridden price
+      // 🔥 CRITICAL FIX: Find retailer's overridden price - FIXED LOGIC
       let finalPrice = product.price; // Default to catalog price
       let isPriceOverridden = false;
 
+      // Find this product in retailer's inventory - FIXED COMPARISON
       const inventoryItem = inventoryItems.find(inv => {
-        const inventoryProductId = inv.product?._id || inv.product;
-        return inventoryProductId && inventoryProductId.toString() === item.productId.toString();
+        // Handle both populated and non-populated product references
+        const inventoryProductId = inv.product?._id ? inv.product._id.toString() : inv.product?.toString();
+        const itemProductId = item.productId.toString();
+        
+        return inventoryProductId === itemProductId;
       });
 
-      if (inventoryItem && inventoryItem.sellingPrice) {
+      if (inventoryItem && inventoryItem.sellingPrice > 0) {
         finalPrice = inventoryItem.sellingPrice;
         isPriceOverridden = finalPrice !== product.price;
-        console.log(`💰 Price override for ${product.name}: ${product.price} → ${finalPrice} (Overridden: ${isPriceOverridden})`);
+        console.log(`💰 Price override for ${product.name}: Catalog ₹${product.price} → Retailer ₹${finalPrice} (Overridden: ${isPriceOverridden})`);
       } else {
-        console.log(`💰 Using catalog price for ${product.name}: ${finalPrice}`);
+        console.log(`💰 Using catalog price for ${product.name}: ₹${finalPrice} (No override found)`);
       }
 
       const itemTotal = finalPrice * item.quantity;
@@ -426,7 +458,7 @@ export const createOfflineOrder = async (req, res) => {
         product: product._id,
         quantity: item.quantity,
         price: finalPrice, // 🔥 Use overridden price
-        originalPrice: product.price, // Store original for reference
+        originalPrice: product.price, // Store original catalog price
         isPriceOverridden: isPriceOverridden, // Track if price was overridden
         priceSource: isPriceOverridden ? 'retailer_inventory' : 'catalog',
         unit: product.unit,
@@ -452,6 +484,7 @@ export const createOfflineOrder = async (req, res) => {
       finalSubtotal,
       finalDiscount
     });
+    console.log(`📊 Price sources: ${orderItems.filter(item => item.isPriceOverridden).length} overridden, ${orderItems.filter(item => !item.isPriceOverridden).length} catalog`);
 
     // Check retailer inventory availability
     const stockCheck = await inventoryService.checkStockAvailability(retailer._id, items);
@@ -537,6 +570,10 @@ export const createOfflineOrder = async (req, res) => {
       await order.populate('items.product', 'name image unit');
 
       console.log('✅ Offline order created successfully with overridden prices');
+      console.log(`💰 Final offline order breakdown:`);
+      order.items.forEach(item => {
+        console.log(`   ${item.product.name}: ${item.quantity} × ₹${item.price} = ₹${item.quantity * item.price} (${item.priceSource})`);
+      });
 
       res.status(201).json({
         success: true,
@@ -551,14 +588,20 @@ export const createOfflineOrder = async (req, res) => {
           reservationStatus: order.reservationStatus,
           orderType: order.orderType,
           items: order.items.map(item => ({
-            product: item.product,
+            product: {
+              _id: item.product._id,
+              name: item.product.name,
+              image: item.product.image,
+              unit: item.product.unit
+            },
             quantity: item.quantity,
             price: item.price,
             originalPrice: item.originalPrice,
             isPriceOverridden: item.isPriceOverridden,
             priceSource: item.priceSource,
             unit: item.unit,
-            productName: item.productName
+            productName: item.productName,
+            itemTotal: item.quantity * item.price
           })),
           customerName: order.customerName,
           customerPhone: order.customerPhone,
@@ -567,6 +610,10 @@ export const createOfflineOrder = async (req, res) => {
             shopName: retailer.shopName
           },
           priceSource: order.priceSource
+        },
+        inventoryUpdate: {
+          reserved: reservationResult.reservedItems.length,
+          delivered: deliveryResult.deliveredItems?.length || 0
         }
       });
 

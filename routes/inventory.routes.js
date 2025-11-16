@@ -11,7 +11,9 @@ import {
   getInventoryLogs,
   updateInventoryItem,
   getInventoryAnalytics,
-  getInventoryForCustomer
+  getInventoryForCustomer,
+  deleteInventoryItem,
+  forceDeleteInventoryItem
 } from '../controllers/inventory.controller.js';
 
 const router = express.Router();
@@ -53,5 +55,8 @@ router.put('/products/:inventoryId', updateInventoryItem);
 router.get('/alerts/low-stock', getLowStockAlerts);
 router.get('/logs', getInventoryLogs);
 router.get('/analytics', getInventoryAnalytics);
+
+router.delete('/products/:inventoryId', deleteInventoryItem);
+router.delete('/products/:inventoryId/force', forceDeleteInventoryItem); // Optional
 
 export default router;

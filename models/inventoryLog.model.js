@@ -102,7 +102,10 @@ const inventoryLogSchema = new mongoose.Schema({
       'INITIAL_SETUP',
       'CORRECTION',
       'PHYSICAL_COUNT',
-      'SYSTEM_ADJUSTMENT'
+      'SYSTEM_ADJUSTMENT',
+      
+      // ✅ ADDED: Deletion Reason
+      'DELETION'
     ]
   },
   notes: {
