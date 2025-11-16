@@ -107,9 +107,13 @@ class InventoryService {
                 userAgent
             } = params;
 
-            console.log('🔄 updateStock:', { transactionType, productId, quantity, reason });
+            if (!productId) throw new Error('productId is required');
+            if (typeof quantity !== 'number' && typeof quantity !== 'string') throw new Error('quantity is required');
 
-            // Find inventory item
+            const qty = Math.abs(parseInt(quantity, 10));
+            if (isNaN(qty) || qty < 0) throw new Error('Invalid quantity');
+
+            // Fetch the inventory doc first (with session)
             const inventoryItem = await RetailerInventory.findOne({
                 retailer: retailerId,
                 product: productId
@@ -119,92 +123,94 @@ class InventoryService {
                 throw new Error('Inventory item not found');
             }
 
-            console.log('📦 Before update - Current:', inventoryItem.currentStock,
-                'Committed:', inventoryItem.committedStock,
-                'Total Sold:', inventoryItem.totalSold);
+            // Snapshot previous values
+            const previousStock = inventoryItem.currentStock || 0;
+            const previousCommitted = inventoryItem.committedStock || 0;
 
-            const previousStock = inventoryItem.currentStock;
-            const previousCommitted = inventoryItem.committedStock;
-            let newStock = previousStock;
-            let newCommitted = previousCommitted;
+            // We'll build atomic updates for inventory
+            const updateOps = {};
+            const incOps = {};
+            const setOps = {
+                lastUpdated: new Date(),
+                updatedBy: userId
+            };
 
-            // Calculate new stock based on transaction type
+            // Handle transaction types
             switch (transactionType) {
                 case 'STOCK_IN':
-                    newStock = previousStock + Math.abs(quantity);
-                    console.log(`📈 STOCK_IN: ${previousStock} + ${quantity} = ${newStock}`);
-                    inventoryItem.lastRestocked = new Date();
+                    // increase currentStock
+                    incOps.currentStock = qty;
+                    setOps.lastRestocked = new Date();
+                    // update costPrice if provided
+                    if (typeof unitCost === 'number' && unitCost >= 0) setOps.costPrice = unitCost;
                     break;
 
                 case 'STOCK_OUT':
-                    newStock = previousStock - Math.abs(quantity);
-                    console.log(`📉 STOCK_OUT: ${previousStock} - ${quantity} = ${newStock}`);
-                    if (newStock < 0) {
+                    // ensure enough stock before decrement
+                    if (previousStock < qty) {
                         throw new Error('Insufficient stock');
                     }
-
-                    // UPDATE SALES METRICS FOR ACTUAL SALES
+                    incOps.currentStock = -qty;
+                    // sale accounting
                     if (reason === 'SALE') {
-                        inventoryItem.totalSold += quantity;
-                        inventoryItem.lastSoldDate = new Date();
-                        console.log(`💰 Updated totalSold: +${quantity} = ${inventoryItem.totalSold}`);
+                        incOps.totalSold = qty;
+                        setOps.lastSoldDate = new Date();
                     }
                     break;
 
                 case 'STOCK_ADJUSTMENT':
-                    newStock = quantity;
-                    console.log(`⚙️ STOCK_ADJUSTMENT: ${previousStock} → ${newStock}`);
-                    if (newStock < 0) {
-                        throw new Error('Stock cannot be negative');
-                    }
+                    // set absolute stock
+                    if (typeof quantity !== 'number') throw new Error('For STOCK_ADJUSTMENT quantity must be a number (new absolute stock)');
+                    if (qty < 0) throw new Error('Stock cannot be negative');
+                    setOps.currentStock = qty;
                     break;
 
                 case 'COMMITMENT':
-                    const availableStock = inventoryItem.currentStock - inventoryItem.committedStock;
-                    console.log(`🔒 COMMITMENT: Available ${availableStock}, Requested ${quantity}`);
-                    if (availableStock < quantity) {
-                        throw new Error('Insufficient available stock for commitment');
-                    }
-                    newCommitted = previousCommitted + quantity;
-                    console.log(`🔒 COMMITMENT: ${previousCommitted} + ${quantity} = ${newCommitted}`);
+                    // reserve stock: check available
+                    const available = previousStock - previousCommitted;
+                    if (available < qty) throw new Error('Insufficient available stock for commitment');
+                    incOps.committedStock = qty;
                     break;
 
                 case 'RELEASE_COMMITMENT':
-                    console.log(`🔓 RELEASE_COMMITMENT: ${previousCommitted} - ${quantity}`);
-                    if (inventoryItem.committedStock < quantity) {
-                        throw new Error('Cannot release more than committed stock');
-                    }
-                    newCommitted = previousCommitted - quantity;
+                    if (previousCommitted < qty) throw new Error('Cannot release more than committed stock');
+                    incOps.committedStock = -qty;
                     break;
 
                 default:
                     throw new Error('Invalid transaction type');
             }
 
-            // Update inventory values
-            if (!['COMMITMENT', 'RELEASE_COMMITMENT'].includes(transactionType)) {
-                inventoryItem.currentStock = newStock;
-            } else {
-                inventoryItem.committedStock = newCommitted;
+            // Build final update operation
+            if (Object.keys(incOps).length) updateOps.$inc = incOps;
+            if (Object.keys(setOps).length) updateOps.$set = setOps;
+
+            // Apply atomic update (returns updated doc)
+            const updatedInventory = await RetailerInventory.findOneAndUpdate(
+                { _id: inventoryItem._id, retailer: retailerId },
+                updateOps,
+                { new: true, session }
+            ).populate('product', 'name sku unit unitSize image');
+
+            // Recompute lowStockAlert using method and persist if changed
+            if (updatedInventory) {
+                updatedInventory.checkLowStock();
+                // If checkLowStock modified lowStockAlert, save the field (without altering stock again)
+                await RetailerInventory.updateOne({ _id: updatedInventory._id }, { $set: { lowStockAlert: updatedInventory.lowStockAlert } }, { session });
             }
 
-            await inventoryItem.save({ session });
-
-            console.log('💾 Inventory saved - Current:', inventoryItem.currentStock,
-                'Committed:', inventoryItem.committedStock,
-                'Total Sold:', inventoryItem.totalSold);
-
-            // Create inventory log
-            const inventoryLog = new InventoryLog({
+            // Compose values for log
+            const finalStock = (updatedInventory && typeof updatedInventory.currentStock === 'number') ? updatedInventory.currentStock : (previousStock + (incOps.currentStock || 0));
+            const logDoc = new InventoryLog({
                 retailer: retailerId,
                 product: productId,
                 inventoryItem: inventoryItem._id,
                 transactionType,
-                quantity: Math.abs(quantity),
+                quantity: qty,
                 previousStock,
-                newStock: ['COMMITMENT', 'RELEASE_COMMITMENT'].includes(transactionType) ? previousStock : newStock,
-                unitCost,
-                totalValue: unitCost ? unitCost * Math.abs(quantity) : 0,
+                newStock: finalStock,
+                unitCost: typeof unitCost === 'number' && unitCost >= 0 ? unitCost : (inventoryItem.costPrice || 0),
+                totalValue: (typeof unitCost === 'number' && unitCost >= 0) ? (unitCost * qty) : ((inventoryItem.costPrice || 0) * qty),
                 referenceType,
                 referenceId,
                 batchNumber,
@@ -216,28 +222,26 @@ class InventoryService {
                 userAgent
             });
 
-            await inventoryLog.save({ session });
+            await logDoc.save({ session });
+
             await session.commitTransaction();
+            session.endSession();
 
-            console.log('✅ updateStock completed successfully');
-
-            // Invalidate cache after successful update
+            // Invalidate cache after commit
             await CacheService.invalidateInventoryCache(retailerId);
 
             return {
                 success: true,
-                inventoryItem: await RetailerInventory.findById(inventoryItem._id)
-                    .populate('product', 'name sku unit unitSize image'),
-                inventoryLog,
-                stockChange: newStock - previousStock
+                inventoryItem: await RetailerInventory.findById(inventoryItem._id).populate('product', 'name sku unit unitSize image'),
+                inventoryLog: logDoc,
+                stockChange: finalStock - previousStock
             };
 
         } catch (error) {
             await session.abortTransaction();
-            console.error('❌ updateStock failed:', error);
-            throw error;
-        } finally {
             session.endSession();
+            console.error('❌ updateStock failed (improved):', error);
+            throw error;
         }
     }
 
@@ -320,6 +324,136 @@ class InventoryService {
             throw error;
         } finally {
             session.endSession();
+        }
+    }
+
+    async addStockToInventory(payload) {
+        const {
+            retailerId,
+            productId,
+            quantity,
+            transactionType = 'STOCK_IN',
+            reason = 'PURCHASE',
+            notes,
+            unitCost: incomingUnitCost,
+            userId,
+            ipAddress,
+            userAgent
+        } = payload;
+
+        if (!quantity || quantity <= 0) {
+            throw new Error('Quantity must be a positive integer');
+        }
+
+        const session = await mongoose.startSession();
+        session.startTransaction();
+
+        try {
+            // Find existing inventory item (for this retailer & product)
+            const inventoryItem = await RetailerInventory.findOne({ retailer: retailerId, product: productId }).session(session);
+
+            if (!inventoryItem) {
+                // Conservative behavior: if inventory item missing, return helpful error
+                // Optionally you can create the inventory item here if you prefer.
+                throw new Error('Product not found in retailer inventory. Add the product first.');
+            }
+
+            // keep previous values
+            const previousStock = inventoryItem.currentStock || 0;
+
+            // Determine unit cost: prefer payload, else inventory.costPrice, else product.price if available
+            let unitCost = typeof incomingUnitCost === 'number' && incomingUnitCost >= 0
+                ? incomingUnitCost
+                : (inventoryItem.costPrice || null);
+
+            if (unitCost === null) {
+                // try to fetch product default price
+                const product = await Product.findById(productId).session(session);
+                if (product) {
+                    unitCost = product.price || 0;
+                } else {
+                    unitCost = 0;
+                }
+            }
+
+            // Update stock and related fields
+            const newStock = previousStock + quantity;
+            inventoryItem.currentStock = newStock;
+            inventoryItem.lastRestocked = new Date();
+            inventoryItem.lastUpdated = new Date();
+            inventoryItem.updatedBy = userId;
+
+            // Optionally update costPrice if incoming unitCost provided and valid
+            if (typeof incomingUnitCost === 'number' && incomingUnitCost >= 0) {
+                inventoryItem.costPrice = incomingUnitCost;
+            }
+
+            // Recalculate low stock alert using your method
+            inventoryItem.checkLowStock(); // sets lowStockAlert
+
+            // Save inventory
+            await inventoryItem.save({ session });
+
+            // Prepare and save inventory log
+            const logDoc = new InventoryLog({
+                retailer: retailerId,
+                product: productId,
+                inventoryItem: inventoryItem._id,
+                transactionType,
+                quantity,
+                previousStock,
+                newStock,
+                unitCost,
+                totalValue: unitCost * quantity,
+                referenceType: 'MANUAL',
+                reason,
+                notes,
+                createdBy: userId,
+                ipAddress,
+                userAgent
+            });
+
+            await logDoc.save({ session });
+
+            // Commit transaction
+            await session.commitTransaction();
+            session.endSession();
+
+            // Populate for response
+            await inventoryItem.populate('product', 'name description price discount unit unitSize image');
+            // Note: retailer populate may not be necessary here (controller already had retailer), but you can populate if needed:
+            // await inventoryItem.populate('retailer', 'businessName');
+
+            // Return an object shaped for API response
+            return {
+                _id: inventoryItem._id,
+                retailer: inventoryItem.retailer,
+                product: inventoryItem.product,
+                productName: inventoryItem.productName,
+                previousStock,
+                addedQuantity: quantity,
+                currentStock: inventoryItem.currentStock,
+                availableStock: inventoryItem.availableStock,
+                sellingPrice: inventoryItem.sellingPrice,
+                costPrice: inventoryItem.costPrice,
+                lastRestocked: inventoryItem.lastRestocked,
+                lastUpdated: inventoryItem.lastUpdated,
+                lowStockAlert: inventoryItem.lowStockAlert,
+                log: {
+                    _id: logDoc._id,
+                    transactionType: logDoc.transactionType,
+                    quantity: logDoc.quantity,
+                    unitCost: logDoc.unitCost,
+                    totalValue: logDoc.totalValue,
+                    reason: logDoc.reason,
+                    createdAt: logDoc.createdAt
+                }
+            };
+
+        } catch (err) {
+            await session.abortTransaction();
+            session.endSession();
+            throw err;
         }
     }
 
@@ -671,6 +805,7 @@ class InventoryService {
                 });
             }
 
+
             await session.commitTransaction();
             await CacheService.invalidateInventoryCache(retailerId);
 
@@ -787,6 +922,7 @@ class InventoryService {
     /**
      * Cancel order - Release reserved stock
      */
+
     async cancelOrderReservation(orderId, retailerId, userId, reason = 'ORDER_CANCELLED') {
         const session = await mongoose.startSession();
         try {
@@ -876,7 +1012,6 @@ class InventoryService {
             totalReserved: reservationLogs.reduce((sum, log) => sum + log.quantity, 0)
         };
     }
-
     /**
      * Get inventory analytics with correct calculations
      */
@@ -885,7 +1020,6 @@ class InventoryService {
             const inventoryData = await this.getRetailerInventory(retailerId, { limit: 1000 }); // Get all inventory
             const recentLogs = await this.getInventoryLogs(retailerId, { limit: 10 });
             const lowStockAlerts = await this.getLowStockAlerts(retailerId);
-
             return {
                 summary: inventoryData.summary,
                 recentActivity: recentLogs.logs.slice(0, 5),
@@ -897,6 +1031,42 @@ class InventoryService {
             throw error;
         }
     }
+    async recordStockUpdate(payload) {
+        const {
+            retailerId,
+            inventoryId,
+            productId,
+            userId,
+            quantity,
+            transactionType = 'STOCK_IN',
+            reason,
+            notes,
+            previousStock,
+            newStock,
+            ipAddress,
+            userAgent,
+            unitCost // optional
+        } = payload;
+
+        const log = new InventoryLog({
+            retailer: retailerId,
+            product: productId,
+            inventoryItem: inventoryId,
+            transactionType,
+            quantity: Math.abs(quantity || 0),
+            previousStock: typeof previousStock === 'number' ? previousStock : 0,
+            newStock: typeof newStock === 'number' ? newStock : 0,
+            unitCost: typeof unitCost === 'number' ? unitCost : 0,
+            totalValue: (typeof unitCost === 'number' ? unitCost : 0) * (Math.abs(quantity || 0)),
+            reason,
+            notes,
+            createdBy: userId,
+            ipAddress,
+            userAgent
+        });
+
+        await log.save();
+        return log;}
 }
 
 export default new InventoryService();

@@ -26,9 +26,8 @@ import {
   updateProductBarcode,
   removeProductBarcode
 } from '../controllers/product.controller.js';
-import auth from '../middlewares/auth.js';
-import adminAuth from '../middlewares/adminAuth.js';
-import upload from '../middlewares/upload.js';
+import { generateProductQR,scanProductQR  } from '../controllers/product.controller.js';
+import { testCloudinaryConnection } from '../utils/cloudinaryUpload.js'; // adjust path if needed
 
 const router = express.Router();
 
@@ -51,7 +50,6 @@ router.post('/scan-public', scanBarcode);
 // PROTECTED ADMIN ROUTES
 // =============================================
 router.get('/barcode/status', auth, adminAuth, getProductsBarcodeStatus);
-
 // 🎯 ENHANCED: Barcode scanning for product creation
 router.post('/scan-barcode', auth, adminAuth, scanBarcodeForProductData);
 router.post('/scan-create', auth, adminAuth, createProductFromBarcode);
