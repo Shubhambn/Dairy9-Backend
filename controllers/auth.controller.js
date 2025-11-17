@@ -194,14 +194,70 @@ export async function signup(req, res) {
 // @desc    Send OTP to existing user
 // @route   POST /api/auth/send-otp
 // @access  Public
+// export async function sendOTP(req, res) {
+//   try {
+//     const { phone } = req.body;
+    
+//     if (!phone) {
+//       return res.status(400).json({ 
+//         success: false,
+//         message: 'Phone number is required' 
+//       });
+//     }
+
+//     // Check if user exists
+//     const user = await User.findOne({ phone });
+//     if (!user) {
+//       return res.status(404).json({ 
+//         success: false,
+//         message: 'User not found. Please sign up first.' 
+//       });
+//     }
+
+//     const otpCode = generateOTP();
+//     user.otp = { 
+//       code: otpCode, 
+//       expiresAt: new Date(Date.now() + 10 * 60 * 1000)
+//     };
+//     await user.save();
+
+//     console.log(`📲 OTP for ${phone}: ${otpCode}`);
+
+//     res.status(200).json({ 
+//       success: true,
+//       message: 'OTP sent successfully' 
+//     });
+//   } catch (error) {
+//     console.error('Send OTP Error:', error);
+//     res.status(500).json({ 
+//       success: false,
+//       message: 'Server error while sending OTP'
+//     });
+//   }
+// }
+
+
+// @desc    Send OTP to existing user
+// @route   POST /api/auth/send-otp
+// @access  Public
 export async function sendOTP(req, res) {
   try {
     const { phone } = req.body;
     
+    // Validation
     if (!phone) {
       return res.status(400).json({ 
         success: false,
         message: 'Phone number is required' 
+      });
+    }
+
+    // Validate phone format (basic validation)
+    const phoneRegex = /^\+?[\d\s-()]{10,}$/;
+    if (!phoneRegex.test(phone)) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Please provide a valid phone number' 
       });
     }
 
@@ -214,27 +270,43 @@ export async function sendOTP(req, res) {
       });
     }
 
-    const otpCode = generateOTP();
+    // Generate OTP
+    const otpCode = generateOTP(); // Make sure this function exists
+    
+    // Save OTP to user
     user.otp = { 
       code: otpCode, 
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000)
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
     };
+    
     await user.save();
 
-    console.log(`📲 OTP for ${phone}: ${otpCode}`);
+    // Log OTP for testing (remove in production)
+    console.log(`📲 OTP for ${phone}: ${otpCode} (Expires: ${user.otp.expiresAt.toLocaleTimeString()})`);
+
+    // In production, you would integrate with SMS service here
+    // await sendSMS(phone, `Your OTP is: ${otpCode}. Valid for 10 minutes.`);
 
     res.status(200).json({ 
       success: true,
-      message: 'OTP sent successfully' 
+      message: 'OTP sent successfully',
+      // For testing purposes only - remove in production
+      debug: {
+        otp: otpCode,
+        expiresAt: user.otp.expiresAt
+      }
     });
+    
   } catch (error) {
     console.error('Send OTP Error:', error);
     res.status(500).json({ 
       success: false,
-      message: 'Server error while sending OTP'
+      message: 'Server error while sending OTP',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 }
+
 
 // @desc    Verify OTP and login user
 // @route   POST /api/auth/verify-otp
