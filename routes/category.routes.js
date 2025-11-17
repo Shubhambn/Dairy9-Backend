@@ -1,16 +1,10 @@
 import express from 'express';
 import {
-  createCategory,
-  deleteCategory,
   getAllProducts,
   getCategories,
   getProductsByCategory,
   searchProducts,
-  updateCategory
 } from '../controllers/category.controller.js';
-import auth from '../middlewares/auth.js';
-import adminAuth from '../middlewares/adminAuth.js';
-import upload from '../middlewares/upload.js';
 
 const router = express.Router();
 
