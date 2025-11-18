@@ -14,6 +14,9 @@ import {createCategory,deleteCategory,updateCategory} from '../controllers/categ
 import auth from '../middlewares/auth.js';
 import upload from '../middlewares/upload.js';
 
+import {generateProductBarcode,removeScannedBarcode,deleteGeneratedBarcode,getProductBarcodeInfo,getProductsBarcodeStatus,createProductFromBarcode,scanBarcodeForProductData,getProductByAnyBarcode,searchProductByBarcode} from '../controllers/product.controller.js';
+
+
 const router = express.Router();
 
 // Test endpoint
@@ -76,14 +79,53 @@ router.delete('/products/:id/images/:imageId', auth, deleteProductImage);
 
 
 // Protected routes (SuperAdmin only)
-router.post('/categories', upload.single('image'), createCategory);
-router.put('/categories/:id', upload.single('image'), updateCategory);
-router.delete('/categories/:id', deleteCategory);
+router.post('/categories',auth, upload.single('image'), createCategory);
+router.put('/categories/:id',auth, upload.single('image'), updateCategory);
+router.delete('/categories/:id',auth, deleteCategory);
 
 // Logs
-router.get('/logs/actions', getActionLogs);
-router.delete('/logs/clear', clearOldLogs);
-router.get('/logs/export', exportLogs);
+router.get('/logs/actions',auth, getActionLogs);
+router.delete('/logs/clear',auth, clearOldLogs);
+router.get('/logs/export',auth, exportLogs);
+
+
+
+
+// =============================================
+// PROTECTED Superadmin (Admin only)
+// =============================================
+
+// Create category (both patterns supported)
+router.post('/categories',auth,upload.single('image'), createCategory);
+router.post('/',auth, upload.single('image'), createCategory); // Alternative pattern
+
+// Update category (both patterns supported)
+router.put('/categories/:id',auth, upload.single('image'), updateCategory);
+router.put('/:id',auth, upload.single('image'), updateCategory); // Alternative pattern
+
+// Delete category (both patterns supported)
+router.delete('/categories/:id',auth, deleteCategory);
+router.delete('/:id',auth, deleteCategory); // Alternative pattern
+
+
+
+
+// =============================================
+// PROTECTED SuperAdmin ROUTES
+// =============================================
+
+// Barcode status and management
+router.get('/barcode/status',auth, getProductsBarcodeStatus);
+router.get('/products/barcode/status', getProductsBarcodeStatus); // Legacy pattern
+
+// Enhanced barcode scanning for product creation
+router.post('/scan-barcode',auth,scanBarcodeForProductData);
+router.post('/products/scan-barcode',); // Legacy pattern
+router.post('/scan-create',auth,createProductFromBarcode);
+
 
 console.log('✅ [ROUTES] All SuperAdmin routes setup complete');
+
+
+
 export default router;
