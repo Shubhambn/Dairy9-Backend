@@ -16,7 +16,8 @@ import upload from '../middlewares/upload.js';
 
 import {generateProductBarcode,removeScannedBarcode,deleteGeneratedBarcode,getProductBarcodeInfo,getProductsBarcodeStatus,createProductFromBarcode,scanBarcodeForProductData,getProductByAnyBarcode,searchProductByBarcode} from '../controllers/product.controller.js';
 
-
+import {scanAndAssignBarcode,updateProductBarcode,removeProductBarcode} from '../controllers/product.controller.js';
+import {getProductById} from '../controllers/product.controller.js';
 const router = express.Router();
 
 // Test endpoint
@@ -122,7 +123,36 @@ router.get('/products/barcode/status', getProductsBarcodeStatus); // Legacy patt
 router.post('/scan-barcode',auth,scanBarcodeForProductData);
 router.post('/products/scan-barcode',); // Legacy pattern
 router.post('/scan-create',auth,createProductFromBarcode);
+router.post('/:id/generate-barcode', auth, generateProductBarcode);
+// router.post('/:id/scan-barcode', auth, scanAndAssignBarcode);
+router.delete('/:id/scanned-barcode', auth, removeScannedBarcode);
+router.delete('/:id/generated-barcode', auth, deleteGeneratedBarcode);
 
+
+
+
+// Legacy barcode routes (for backward compatibility)
+
+
+
+
+
+
+// Legacy barcode routes (for backward compatibility)
+router.post('/:id/barcode', auth, scanAndAssignBarcode);
+router.post('/products/:id/barcode', auth, scanAndAssignBarcode); // Legacy pattern
+router.put('/:id/barcode', auth, updateProductBarcode);
+router.put('/products/:id/barcode', auth,  updateProductBarcode); // Legacy pattern
+router.delete('/:id/barcode', auth,  removeProductBarcode);
+router.delete('/products/:id/barcode', auth,  removeProductBarcode); // Legacy pattern
+
+// =============================================
+// ADDITIONAL UTILITY ROUTES
+// =============================================
+
+// Product info routes
+router.get('/:id/barcode-info', getProductBarcodeInfo);
+router.get('/id/:productId', getProductById);
 
 console.log('✅ [ROUTES] All SuperAdmin routes setup complete');
 
