@@ -309,14 +309,39 @@ export const getOrderHistory = async (req, res) => {
 export async function assignRetailerForCustomer(req, res) {
   try {
     const userId = req.user?.id || req.user?._id;
-    const { lat, lng, address, temporary = true } = req.body;
+    const { lat, lng, address, temporary = true, useCached = false } = req.body;
 
     const customer = await Customer.findOne({ user: userId });
     if (!customer) {
       return res.status(404).json({ success: false, message: "Customer profile not found" });
     }
 
-    // If coordinates provided -> find nearest retailer (Admin model)
+    // NEW: Check if client wants to use cached retailer
+    if (useCached && customer.currentRetailer) {
+      const cachedRetailer = await Admin.findById(customer.currentRetailer).lean();
+      if (cachedRetailer) {
+        const inventory = await RetailerInventory.find({
+          retailer: cachedRetailer._id,
+          isActive: true
+        }).populate("product").lean();
+
+        return res.json({
+          success: true,
+          cached: true, // flag to indicate cached data
+          temporary: true,
+          retailer: {
+            _id: cachedRetailer._id,
+            shopName: cachedRetailer.shopName,
+            address: cachedRetailer.address,
+            location: cachedRetailer.location,
+            serviceRadius: cachedRetailer.serviceRadius
+          },
+          inventory,
+        });
+      }
+    }
+
+    // Existing logic for new retailer assignment
     let nearestRetailer = null;
     let distance = null;
     if (typeof lat === "number" && typeof lng === "number") {
@@ -327,7 +352,6 @@ export async function assignRetailerForCustomer(req, res) {
       }
     }
 
-    // If no coords or no nearby retailer found -> fallback to assignedRetailer or any active admin/retailer
     if (!nearestRetailer) {
       if (customer.assignedRetailer) {
         nearestRetailer = await Admin.findById(customer.assignedRetailer).lean();
@@ -340,7 +364,7 @@ export async function assignRetailerForCustomer(req, res) {
       return res.status(404).json({ success: false, message: "No active retailer found" });
     }
 
-    // Save current location when coords provided
+    // Save location and retailer
     if (typeof lat === "number" && typeof lng === "number") {
       customer.currentLocation = {
         coordinates: { latitude: lat, longitude: lng },
@@ -349,10 +373,9 @@ export async function assignRetailerForCustomer(req, res) {
       };
     }
 
-    // Set currentRetailer (temporary override)
+    // ALWAYS update currentRetailer (session retailer)
     customer.currentRetailer = nearestRetailer._id;
 
-    // If temporary=false => persist to assignedRetailer (home)
     if (!temporary) {
       customer.assignedRetailer = nearestRetailer._id;
       customer.assignedOn = new Date();
@@ -360,7 +383,6 @@ export async function assignRetailerForCustomer(req, res) {
 
     await customer.save();
 
-    // Fetch inventory for this retailer
     const inventory = await RetailerInventory.find({
       retailer: nearestRetailer._id,
       isActive: true
@@ -368,6 +390,7 @@ export async function assignRetailerForCustomer(req, res) {
 
     return res.json({
       success: true,
+      cached: false,
       temporary: !!temporary,
       distance,
       retailer: {
