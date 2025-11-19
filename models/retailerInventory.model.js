@@ -1,5 +1,33 @@
-// J:\dairy9 backend\Dairy9-Backend\models\retailerInventory.model.js
+// models/retailerInventory.model.js - Updated schema
 import mongoose from 'mongoose';
+
+// Define pricing slab schema
+const pricingSlabSchema = new mongoose.Schema({
+  minQuantity: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  maxQuantity: {
+    type: Number,
+    required: true,
+    min: 1
+  },
+  discountType: {
+    type: String,
+    enum: ['FLAT', 'PERCENTAGE'],
+    required: true
+  },
+  discountValue: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+}, { _id: false });
 
 const retailerInventorySchema = new mongoose.Schema({
   retailer: {
@@ -26,18 +54,26 @@ const retailerInventorySchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
-//   reservedStock: {
-//     type: Number,
-//     default: 0,
-//     min: 0
-//   },
-  sellingPrice: {
+  // Base price from superadmin (read-only reference)
+  basePrice: {
     type: Number,
     min: 0
+  },
+  // Retailer's selling price (overrides base price)
+  sellingPrice: {
+    type: Number,
+    min: 0,
+    required: true
   },
   costPrice: {
     type: Number,
     min: 0
+  },
+  // Quantity-based pricing slabs (applied on sellingPrice)
+  pricingSlabs: [pricingSlabSchema],
+  enableQuantityPricing: {
+    type: Boolean,
+    default: false
   },
   minStockLevel: {
     type: Number,
@@ -47,7 +83,8 @@ const retailerInventorySchema = new mongoose.Schema({
     type: Number,
     default: 100
   },
-  reorderQuantity: {
+  // ... rest of the fields
+   reorderQuantity: {
     type: Number,
     default: 50
   },
@@ -86,6 +123,36 @@ const retailerInventorySchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Update the calculateFinalPrice method
+retailerInventorySchema.methods.calculateFinalPrice = function(quantity) {
+  // Always use sellingPrice as the base for calculations
+  const basePrice = this.sellingPrice || 0;
+  
+  if (!this.enableQuantityPricing || !this.pricingSlabs || this.pricingSlabs.length === 0) {
+    return basePrice * quantity;
+  }
+
+  // Find the applicable pricing slab
+  const applicableSlab = this.pricingSlabs
+    .filter(slab => slab.isActive)
+    .sort((a, b) => a.minQuantity - b.minQuantity)
+    .find(slab => quantity >= slab.minQuantity && quantity <= slab.maxQuantity);
+
+  if (!applicableSlab) {
+    return basePrice * quantity;
+  }
+
+  const totalPrice = basePrice * quantity;
+  let discountAmount = 0;
+
+  if (applicableSlab.discountType === 'FLAT') {
+    discountAmount = applicableSlab.discountValue;
+  } else if (applicableSlab.discountType === 'PERCENTAGE') {
+    discountAmount = (totalPrice * applicableSlab.discountValue) / 100;
+  }
+
+  return Math.max(0, totalPrice - discountAmount);
+};
 // Compound index
 retailerInventorySchema.index({ retailer: 1, product: 1 }, { unique: true });
 
@@ -119,4 +186,4 @@ retailerInventorySchema.pre('save', function(next) {
 
 const RetailerInventory = mongoose.model('RetailerInventory', retailerInventorySchema);
 
-export default RetailerInventory;
+export default RetailerInventory;    //TEJAS
