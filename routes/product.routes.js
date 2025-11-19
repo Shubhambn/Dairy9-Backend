@@ -134,9 +134,9 @@ router.delete('/:id/images/:imageId', auth, adminAuth, deleteProductImage);
 // QR CODE MANAGEMENT ROUTES
 // =============================================
 
-router.post("/generate/:id", generateProductQR);
-router.post("/products/generate/:id", generateProductQR); // Legacy pattern
-router.post("/:id/generate-qr", generateProductQR); // Enhanced pattern
+// router.post("/generate/:id", generateProductQR);
+// router.post("/products/generate/:id", generateProductQR); // Legacy pattern
+// router.post("/:id/generate-qr", generateProductQR); // Enhanced pattern
 
 // =============================================
 // BARCODE MANAGEMENT ROUTES

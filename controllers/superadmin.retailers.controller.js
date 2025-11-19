@@ -2,14 +2,13 @@
 import Admin from '../models/admin.model.js';
 import Order from '../models/order.model.js';
 import User from '../models/user.model.js';
+import Product from '../models/product.model.js';
 
 export const getAllRetailers = async (req, res) => {
   try {
     console.log('🏪 [RETAILERS] Starting get all retailers request');
     
-    // Use req.user instead of req.superadmin
     if (!req.user) {
-      console.error('❌ [RETAILERS] req.user is undefined!');
       return res.status(401).json({
         success: false,
         message: 'Authentication required'
@@ -24,8 +23,6 @@ export const getAllRetailers = async (req, res) => {
       sortBy = 'createdAt',
       sortOrder = 'desc'
     } = req.query;
-
-    console.log('🏪 [RETAILERS] Query params:', { page, limit, search, status });
 
     // Build filter
     const filter = {};
@@ -43,10 +40,10 @@ export const getAllRetailers = async (req, res) => {
       if (status === 'inactive') filter.isActive = false;
     }
 
-    // Pagination
     const skip = (page - 1) * limit;
     const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
 
+    // Fetch retailers
     const [retailers, total] = await Promise.all([
       Admin.find(filter)
         .populate('user', 'mobile lastLogin')
@@ -56,21 +53,88 @@ export const getAllRetailers = async (req, res) => {
       Admin.countDocuments(filter)
     ]);
 
-    // Format retailers for response
-    const formattedRetailers = retailers.map(retailer => ({
-      _id: retailer._id,
-      shopName: retailer.shopName,
-      ownerName: retailer.fullName,
-      mobile: retailer.user?.mobile || retailer.contactNumber,
-      address: retailer.address,
-      location: retailer.location,
-      serviceRadius: retailer.serviceRadius,
-      isActive: retailer.isActive,
-      createdAt: retailer.createdAt,
-      updatedAt: retailer.updatedAt
-    }));
+    // ---------------------------------------------
+    // 🔥 GET ORDER STATS FOR ALL RETAILERS
+    // ---------------------------------------------
+    const orderStats = await Order.aggregate([
+      {
+        $match: { orderStatus: { $ne: 'cancelled' } }
+      },
+      {
+        $group: {
+          _id: '$assignedRetailer',
+          totalOrders: { $sum: 1 },
+          revenue: { $sum: '$finalAmount' },
+          completedOrders: {
+            $sum: { $cond: [{ $eq: ['$orderStatus', 'delivered'] }, 1, 0] }
+          }
+        }
+      }
+    ]);
 
-    // Get retailer stats
+    const orderMap = new Map();
+    orderStats.forEach(o => {
+      orderMap.set(o._id?.toString(), o);
+    });
+
+    // ---------------------------------------------
+    // 🔥 GET PRODUCT COUNT FOR EACH RETAILER
+    // ---------------------------------------------
+    const productStats = await Product.aggregate([
+      {
+        $group: {
+          _id: '$createdBy',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const productMap = new Map();
+    productStats.forEach(p => {
+      productMap.set(p._id?.toString(), p.count);
+    });
+
+    // ---------------------------------------------
+    // 🔥 FORMAT FINAL RETAILER LIST WITH NEW FIELDS
+    // ---------------------------------------------
+    const formattedRetailers = retailers.map(retailer => {
+      const id = retailer._id.toString();
+      const o = orderMap.get(id) || {
+        totalOrders: 0,
+        revenue: 0,
+        completedOrders: 0
+      };
+
+      const productCount = productMap.get(id) || 0;
+
+      // ⭐ Simple rating formula based on performance
+      let rating = 0;
+      if (o.totalOrders > 0) {
+        rating = +((o.completedOrders / o.totalOrders) * 5).toFixed(1);
+      }
+
+      return {
+        // EXISTING FIELDS (unchanged)
+        _id: retailer._id,
+        shopName: retailer.shopName,
+        ownerName: retailer.fullName,
+        mobile: retailer.user?.mobile || retailer.contactNumber,
+        address: retailer.address,
+        location: retailer.location,
+        serviceRadius: retailer.serviceRadius,
+        isActive: retailer.isActive,
+        createdAt: retailer.createdAt,
+        updatedAt: retailer.updatedAt,
+
+        // NEW FIELDS ADDED BELOW
+        orders: o.totalOrders,
+        revenue: o.revenue,
+        products: productCount,
+        rating
+      };
+    });
+
+    // Retailer stats
     const stats = await Admin.aggregate([
       {
         $group: {
@@ -80,15 +144,6 @@ export const getAllRetailers = async (req, res) => {
         }
       }
     ]);
-
-    // Log action using console.log instead of req.superadmin.logAction
-    console.log('🏪 [RETAILERS] SuperAdmin viewed retailers list:', {
-      userId: req.user._id,
-      page,
-      search,
-      status,
-      results: formattedRetailers.length
-    });
 
     res.json({
       success: true,
@@ -109,13 +164,14 @@ export const getAllRetailers = async (req, res) => {
 
   } catch (error) {
     console.error('❌ [RETAILERS] Get retailers error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Failed to fetch retailers',
       error: error.message
     });
   }
 };
+;
 
 // ... keep other functions but remove all req.superadmin.logAction calls
 
