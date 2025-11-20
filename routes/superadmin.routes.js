@@ -70,24 +70,24 @@ router.get('/reports/system-overview', generateSystemOverviewReport);
 
 // Product & Category
 // Protected routes (SuperAdmin) with file upload
-router.post('/products', auth, upload.single('image'), createProduct);
-router.put('/products/:id', auth, upload.single('image'), updateProduct);
-router.delete('/products/:id', auth, deleteProduct);
+router.post('/products',  upload.single('image'), createProduct);
+router.put('/products/:id',  upload.single('image'), updateProduct);
+router.delete('/products/:id',  deleteProduct);
 
 // Image management routes
-router.post('/products/:id/images', auth, upload.array('images', 5), uploadProductImages);
-router.delete('/products/:id/images/:imageId', auth, deleteProductImage);
+router.post('/products/:id/images',  upload.array('images', 5), uploadProductImages);
+router.delete('/products/:id/images/:imageId',  deleteProductImage);
 
 
 // Protected routes (SuperAdmin only)
-router.post('/categories',auth, upload.single('image'), createCategory);
-router.put('/categories/:id',auth, upload.single('image'), updateCategory);
-router.delete('/categories/:id',auth, deleteCategory);
+router.post('/categories', upload.single('image'), createCategory);
+router.put('/categories/:id', upload.single('image'), updateCategory);
+router.delete('/categories/:id', deleteCategory);
 
 // Logs
-router.get('/logs/actions',auth, getActionLogs);
-router.delete('/logs/clear',auth, clearOldLogs);
-router.get('/logs/export',auth, exportLogs);
+router.get('/logs/actions', getActionLogs);
+router.delete('/logs/clear', clearOldLogs);
+router.get('/logs/export', exportLogs);
 
 
 
@@ -97,16 +97,16 @@ router.get('/logs/export',auth, exportLogs);
 // =============================================
 
 // Create category (both patterns supported)
-router.post('/categories',auth,upload.single('image'), createCategory);
-router.post('/',auth, upload.single('image'), createCategory); // Alternative pattern
+router.post('/categories',upload.single('image'), createCategory);
+router.post('/', upload.single('image'), createCategory); // Alternative pattern
 
 // Update category (both patterns supported)
-router.put('/categories/:id',auth, upload.single('image'), updateCategory);
-router.put('/:id',auth, upload.single('image'), updateCategory); // Alternative pattern
+router.put('/categories/:id', upload.single('image'), updateCategory);
+router.put('/:id', upload.single('image'), updateCategory); // Alternative pattern
 
 // Delete category (both patterns supported)
-router.delete('/categories/:id',auth, deleteCategory);
-router.delete('/:id',auth, deleteCategory); // Alternative pattern
+router.delete('/categories/:id', deleteCategory);
+router.delete('/:id', deleteCategory); // Alternative pattern
 
 
 
@@ -116,17 +116,17 @@ router.delete('/:id',auth, deleteCategory); // Alternative pattern
 // =============================================
 
 // Barcode status and management
-router.get('/barcode/status',auth, getProductsBarcodeStatus);
+router.get('/barcode/status', getProductsBarcodeStatus);
 router.get('/products/barcode/status', getProductsBarcodeStatus); // Legacy pattern
 
 // Enhanced barcode scanning for product creation
-router.post('/scan-barcode',auth,scanBarcodeForProductData);
-router.post('/products/scan-barcode',); // Legacy pattern
-router.post('/scan-create',auth,createProductFromBarcode);
-router.post('/:id/generate-barcode', auth, generateProductBarcode);
+router.post('/scan-barcode' ,scanBarcodeForProductData);
+router.post('/products/scan-barcode', scanBarcodeForProductData); // Legacy pattern
+router.post('/scan-create', createProductFromBarcode);
+router.post('/:id/generate-barcode',  generateProductBarcode);
 // router.post('/:id/scan-barcode', auth, scanAndAssignBarcode);
-router.delete('/:id/scanned-barcode', auth, removeScannedBarcode);
-router.delete('/:id/generated-barcode', auth, deleteGeneratedBarcode);
+router.delete('/:id/scanned-barcode',    removeScannedBarcode);
+router.delete('/:id/generated-barcode', deleteGeneratedBarcode);
 
 
 
@@ -139,12 +139,12 @@ router.delete('/:id/generated-barcode', auth, deleteGeneratedBarcode);
 
 
 // Legacy barcode routes (for backward compatibility)
-router.post('/:id/barcode', auth, scanAndAssignBarcode);
-router.post('/products/:id/barcode', auth, scanAndAssignBarcode); // Legacy pattern
-router.put('/:id/barcode', auth, updateProductBarcode);
-router.put('/products/:id/barcode', auth,  updateProductBarcode); // Legacy pattern
-router.delete('/:id/barcode', auth,  removeProductBarcode);
-router.delete('/products/:id/barcode', auth,  removeProductBarcode); // Legacy pattern
+router.post('/:id/barcode',  scanAndAssignBarcode);
+router.post('/products/:id/barcode',  scanAndAssignBarcode); // Legacy pattern
+router.put('/:id/barcode',  updateProductBarcode);
+router.put('/products/:id/barcode',  updateProductBarcode); // Legacy pattern
+router.delete('/:id/barcode',  removeProductBarcode);
+router.delete('/products/:id/barcode', removeProductBarcode); // Legacy pattern
 
 // =============================================
 // ADDITIONAL UTILITY ROUTES

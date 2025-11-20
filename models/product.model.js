@@ -57,11 +57,6 @@ const productSchema = new mongoose.Schema({
     required: true,
     min: [0, 'Unit size cannot be negative']
   },
-  stock: {
-    type: Number,
-    default: 0,
-    min: [0, 'Stock cannot be negative']
-  },
   isAvailable: {
     type: Boolean,
     default: true

@@ -35,6 +35,30 @@ const generateAndAssignBarcode = async (product) => {
   return barcodeUpload.secure_url;
 };
 
+// Helper function to check barcode uniqueness
+const checkBarcodeUniqueness = async (barcode, excludeProductId = null) => {
+  if (!barcode) return { isUnique: true, existingProduct: null };
+  
+  const filter = {
+    $or: [
+      { scannedBarcodeId: barcode.trim() },
+      { barcodeId: barcode.trim() }
+    ],
+    isAvailable: true
+  };
+  
+  if (excludeProductId) {
+    filter._id = { $ne: excludeProductId };
+  }
+  
+  const existingProduct = await Product.findOne(filter);
+  
+  return {
+    isUnique: !existingProduct,
+    existingProduct: existingProduct
+  };
+};
+
 // ──────────────────────────────────────────────────────────────
 // PRODUCT CRUD OPERATIONS
 // ──────────────────────────────────────────────────────────────
@@ -57,7 +81,7 @@ export const createProduct = async (req, res) => {
       name, description, price, category, unit, unitSize, stock, 
       milkType, nutritionalInfo, tags, discount, isFeatured,
       scannedBarcodeId,
-      cloudinaryImages // 🎯 Accept pre-uploaded Cloudinary images
+      cloudinaryImages
     } = req.body;
 
     // 1️⃣ Validate required fields
@@ -79,7 +103,8 @@ export const createProduct = async (req, res) => {
 
     // 3️⃣ Check duplicate product name
     const existingProduct = await Product.findOne({ 
-      name: { $regex: new RegExp(`^${name}$`, 'i') } 
+      name: { $regex: new RegExp(`^${name}$`, 'i') },
+      isAvailable: true
     });
     if (existingProduct) {
       return res.status(400).json({
@@ -88,28 +113,23 @@ export const createProduct = async (req, res) => {
       });
     }
 
-    // 4️⃣ Check duplicate barcode
+    // 4️⃣ Check duplicate barcode using helper function
     if (scannedBarcodeId) {
-      const existingBarcode = await Product.findOne({
-        $or: [
-          { scannedBarcodeId: scannedBarcodeId.trim() },
-          { barcodeId: scannedBarcodeId.trim() }
-        ]
-      });
-
-      if (existingBarcode) {
+      const { isUnique, existingProduct: barcodeProduct } = await checkBarcodeUniqueness(scannedBarcodeId);
+      
+      if (!isUnique) {
         return res.status(400).json({
           success: false,
           message: 'This barcode is already assigned to another product',
           existingProduct: {
-            id: existingBarcode._id,
-            name: existingBarcode.name
+            id: barcodeProduct._id,
+            name: barcodeProduct.name
           }
         });
       }
     }
 
-    // 5️⃣ 🎯 FIX: Handle images from multiple sources
+    // 5️⃣ Handle images from multiple sources
     let imageUrl = '/images/default-product.jpg';
     let imagePublicId = null;
     let additionalImages = [];
@@ -118,19 +138,14 @@ export const createProduct = async (req, res) => {
     if (cloudinaryImages && Array.isArray(cloudinaryImages) && cloudinaryImages.length > 0) {
       console.log('📸 Using pre-uploaded Cloudinary images:', cloudinaryImages.length);
       
-      // First image as main
       const mainImage = cloudinaryImages[0];
       imageUrl = mainImage.url;
       imagePublicId = mainImage.publicId;
       
-      // Rest as additional
       additionalImages = cloudinaryImages.slice(1).map(img => ({
         url: img.url,
         publicId: img.publicId
       }));
-      
-      console.log('✅ Main image:', imageUrl);
-      console.log('✅ Additional images:', additionalImages.length);
     }
     // Priority 2: Upload from FormData if no Cloudinary images
     else if (req.file) {
@@ -138,7 +153,6 @@ export const createProduct = async (req, res) => {
         const uploadResult = await uploadToCloudinary(req.file.buffer, 'dairy9/products');
         imageUrl = uploadResult.secure_url;
         imagePublicId = uploadResult.public_id;
-        console.log('✅ Uploaded main image from FormData');
       } catch (uploadError) {
         console.error('Image upload failed:', uploadError.message);
       }
@@ -201,14 +215,12 @@ export const createProduct = async (req, res) => {
       const qrWithTextBuffer = await addTextToQR(qrBuffer, product.name);
       const qrUpload = await uploadToCloudinary(qrWithTextBuffer, 'dairy9/products/qr');
 
-      // Save QR info to product
       product.qrCodeUrl = qrUpload.secure_url;
       product.qrCodeId = qrUpload.public_id;
       await product.save();
 
     } catch (qrError) {
       console.error('QR code generation/upload failed:', qrError.message);
-      // Continue without QR
     }
 
     // 8️⃣ Fetch final updated product for response
@@ -303,7 +315,6 @@ export const getAllProducts = async (req, res) => {
     const productsWithBarcodeInfo = products.map(product => ({
       ...product,
       discountedPrice: product.price - (product.price * (product.discount || 0) / 100),
-      // Enhanced barcode information
       hasGeneratedBarcode: !!product.barcodeId,
       hasScannedBarcode: !!product.scannedBarcodeId,
       activeBarcodeId: product.scannedBarcodeId || product.barcodeId,
@@ -417,6 +428,22 @@ export const updateProduct = async (req, res) => {
         return res.status(400).json({
           success: false,
           message: 'Category not found'
+        });
+      }
+    }
+
+    // Check barcode uniqueness if scannedBarcodeId is being updated
+    if (req.body.scannedBarcodeId && req.body.scannedBarcodeId !== product.scannedBarcodeId) {
+      const { isUnique, existingProduct } = await checkBarcodeUniqueness(req.body.scannedBarcodeId, product._id);
+      
+      if (!isUnique) {
+        return res.status(400).json({
+          success: false,
+          message: 'This barcode is already assigned to another product',
+          existingProduct: {
+            id: existingProduct._id,
+            name: existingProduct.name
+          }
         });
       }
     }
@@ -781,7 +808,9 @@ export const deleteProductImage = async (req, res) => {
 // QR CODE MANAGEMENT
 // ──────────────────────────────────────────────────────────────
 
-// 🎯 Generate a QR for an existing product
+// @desc    Generate a QR for an existing product
+// @route   POST /api/catalog/products/:id/generate-qr
+// @access  Private (Admin)
 export const generateProductQR = async (req, res) => {
   try {
     const { id } = req.params;
@@ -835,10 +864,12 @@ export const generateProductQR = async (req, res) => {
   }
 };
 
-// 🎯 Decode QR — when user scans and sends data
+// @desc    Decode QR — when user scans and sends data
+// @route   POST /api/catalog/products/scan-qr
+// @access  Public
 export const scanProductQR = async (req, res) => {
   try {
-    const { productId } = req.body; // Data extracted from QR scanner app
+    const { productId } = req.body;
 
     const product = await Product.findById(productId);
     if (!product) {
@@ -888,49 +919,28 @@ export const scanAndAssignBarcode = async (req, res) => {
       });
     }
 
-    // 3️⃣ Check if scanned barcode is already assigned to another product
-    const existingProductWithScannedBarcode = await Product.findOne({
-      scannedBarcodeId: scannedBarcodeId,
-      _id: { $ne: id }
-    });
+    // 3️⃣ Use helper function to check barcode uniqueness
+    const { isUnique, existingProduct } = await checkBarcodeUniqueness(scannedBarcodeId, id);
 
-    if (existingProductWithScannedBarcode) {
+    if (!isUnique) {
       return res.status(400).json({
         success: false,
-        message: 'This scanned barcode is already assigned to another product',
+        message: 'This barcode is already assigned to another product',
         existingProduct: {
-          id: existingProductWithScannedBarcode._id,
-          name: existingProductWithScannedBarcode.name
+          id: existingProduct._id,
+          name: existingProduct.name
         }
       });
     }
 
-    // 4️⃣ Check if this scanned barcode matches any generated barcode in system
-    const productWithGeneratedBarcode = await Product.findOne({
-      barcodeId: scannedBarcodeId,
-      _id: { $ne: id }
-    });
-
-    if (productWithGeneratedBarcode) {
-      return res.status(400).json({
-        success: false,
-        message: 'This barcode matches a generated barcode of another product',
-        conflictingProduct: {
-          id: productWithGeneratedBarcode._id,
-          name: productWithGeneratedBarcode.name
-        }
-      });
-    }
-
-    // 5️⃣ Assign scanned barcode (DO NOT overwrite generated barcode)
+    // 4️⃣ Assign scanned barcode (DO NOT overwrite generated barcode)
     const oldScannedBarcode = product.scannedBarcodeId;
-    product.scannedBarcodeId = scannedBarcodeId;
-    // Keep barcodeId separate for generated barcodes
+    product.scannedBarcodeId = scannedBarcodeId.trim();
     await product.save();
 
     console.log('✅ Scanned barcode assigned successfully');
 
-    // 6️⃣ Return updated product with enhanced barcode info
+    // 5️⃣ Return updated product with enhanced barcode info
     const updatedProduct = await Product.findById(id)
       .populate('category', 'name');
 
@@ -938,22 +948,20 @@ export const scanAndAssignBarcode = async (req, res) => {
       ...updatedProduct.toObject(),
       hasGeneratedBarcode: !!updatedProduct.barcodeId,
       hasScannedBarcode: true,
-      activeBarcodeId: scannedBarcodeId, // Scanned barcode takes priority for display
+      activeBarcodeId: scannedBarcodeId.trim(),
       barcodeType: 'scanned',
-      // Include both barcode types for frontend
-      barcodeId: updatedProduct.barcodeId, // Generated barcode (product ID)
-      scannedBarcodeId: scannedBarcodeId   // Scanned external barcode
+      barcodeId: updatedProduct.barcodeId,
+      scannedBarcodeId: scannedBarcodeId.trim()
     };
 
     console.log('📦 Generated Barcode (barcodeId):', updatedProduct.barcodeId);
     console.log('📦 Scanned Barcode (scannedBarcodeId):', updatedProduct.scannedBarcodeId);
-    console.log('📦 Active Barcode (for display):', scannedBarcodeId);
 
     res.status(200).json({
       success: true,
       message: 'Scanned barcode assigned successfully',
       barcodeType: 'scanned',
-      scannedBarcodeId: scannedBarcodeId,
+      scannedBarcodeId: scannedBarcodeId.trim(),
       previousScannedBarcode: oldScannedBarcode,
       product: productWithBarcodeInfo
     });
@@ -1075,7 +1083,7 @@ export const removeScannedBarcode = async (req, res) => {
       ...updatedProduct.toObject(),
       hasScannedBarcode: false,
       hasGeneratedBarcode: !!updatedProduct.barcodeId,
-      activeBarcodeId: updatedProduct.barcodeId, // Fall back to generated barcode
+      activeBarcodeId: updatedProduct.barcodeId,
       barcodeType: updatedProduct.barcodeId ? 'generated' : 'none'
     };
 
@@ -1127,7 +1135,6 @@ export const deleteGeneratedBarcode = async (req, res) => {
       console.log('✅ Barcode image deleted from Cloudinary');
     } catch (deleteError) {
       console.error('Error deleting barcode image from Cloudinary:', deleteError);
-      // Continue with deletion from database even if Cloudinary delete fails
     }
 
     // Remove barcode info
@@ -1145,7 +1152,7 @@ export const deleteGeneratedBarcode = async (req, res) => {
       ...updatedProduct.toObject(),
       hasGeneratedBarcode: false,
       hasScannedBarcode: !!updatedProduct.scannedBarcodeId,
-      activeBarcodeId: updatedProduct.scannedBarcodeId, // Fall back to scanned barcode if exists
+      activeBarcodeId: updatedProduct.scannedBarcodeId,
       barcodeType: updatedProduct.scannedBarcodeId ? 'scanned' : 'none'
     };
 
@@ -1184,8 +1191,8 @@ export const getProductByBarcode = async (req, res) => {
         { isAvailable: true },
         {
           $or: [
-            { scannedBarcodeId: barcodeId }, // Scanned barcodes first
-            { barcodeId: barcodeId }         // Generated barcodes second
+            { scannedBarcodeId: barcodeId },
+            { barcodeId: barcodeId }
           ]
         }
       ]
@@ -1610,192 +1617,18 @@ export const getProductsBarcodeStatus = async (req, res) => {
 // BARCODE SCANNING FOR PRODUCT CREATION
 // ──────────────────────────────────────────────────────────────
 
-// @desc    Create product from scanned barcode (with enhanced OpenFoodFacts integration)
-// @route   POST /api/catalog/products/scan-create
+// @desc    Scan barcode for product data (ENHANCED WITH PROPER BARCODE ASSIGNMENT)
+// @route   POST /api/catalog/products/scan-barcode
 // @access  Private (Admin)
-export const createProductFromBarcode = async (req, res) => {
-  // 0️⃣ Test Cloudinary connection
-  const cloudinaryConnected = await testCloudinaryConnection();
-  if (!cloudinaryConnected) {
-    return res.status(503).json({
-      success: false,
-      message: 'File upload service temporarily unavailable'
-    });
-  }
-
-  try {
-    const { barcode } = req.body;
-
-    console.log('=== ENHANCED BARCODE PRODUCT CREATION START ===');
-    console.log('📦 Barcode:', barcode);
-
-    // 1️⃣ Validate barcode
-    if (!barcode) {
-      return res.status(400).json({
-        success: false,
-        message: 'Barcode is required'
-      });
-    }
-
-    // 2️⃣ Check if barcode is already assigned to another product
-    const existingProduct = await Product.findOne({
-      $or: [
-        { scannedBarcodeId: barcode },
-        { barcodeId: barcode }
-      ]
-    });
-
-    if (existingProduct) {
-      return res.status(200).json({ // Use 200 to prevent frontend errors
-        success: true,
-        message: 'Barcode already assigned to existing product',
-        existingProduct: {
-          id: existingProduct._id,
-          name: existingProduct.name
-        },
-        productExists: true
-      });
-    }
-
-    // 3️⃣ Fetch ALL categories for matching
-    const allCategories = await Category.find({}).select('name _id');
-    console.log('📋 Available categories:', allCategories.length);
-
-    // 4️⃣ Fetch enhanced product data from OpenFoodFacts
-    console.log('🔍 Fetching enhanced data from OpenFoodFacts...');
-    let openFoodFactsData = null;
-    let uploadedImages = [];
-    
-    try {
-      openFoodFactsData = await openFoodFactsService.getProductByBarcode(barcode);
-      console.log('✅ OpenFoodFacts data retrieved:', openFoodFactsData.found ? 'Found' : 'Not found');
-
-      // 5️⃣ Download and upload images to Cloudinary if product found
-      if (openFoodFactsData.found && openFoodFactsData.images.length > 0) {
-        console.log('🖼️ Downloading product images...');
-        uploadedImages = await openFoodFactsService.downloadAndUploadImages(
-          openFoodFactsData.images.slice(0, 3) // Download max 3 images
-        );
-        console.log(`✅ Downloaded ${uploadedImages.length} images`);
-      }
-    } catch (apiError) {
-      console.warn('⚠️ OpenFoodFacts API error:', apiError.message);
-      // Continue without OpenFoodFacts data
-      openFoodFactsData = { found: false };
-    }
-
-    // 6️⃣ Prepare suggested product data
-    const { unit: extractedUnit, unitSize: extractedUnitSize } = openFoodFactsData?.found 
-      ? openFoodFactsService.extractUnitAndSize(openFoodFactsData.quantity)
-      : { unit: 'piece', unitSize: 1 };
-
-    const extractedMilkType = openFoodFactsData?.found 
-      ? openFoodFactsService.extractMilkType(openFoodFactsData.rawData)
-      : 'Cow';
-
-    // Find matching category - ENHANCED LOGIC
-    let matchedCategoryId = null;
-    if (openFoodFactsData?.found) {
-      matchedCategoryId = openFoodFactsService.findMatchingCategory(openFoodFactsData.categories, allCategories);
-    }
-
-    // Prepare tags from OpenFoodFacts data
-    const autoTags = [];
-    if (openFoodFactsData?.found) {
-      if (openFoodFactsData.brand) autoTags.push(openFoodFactsData.brand);
-      if (openFoodFactsData.labels) autoTags.push(...openFoodFactsData.labels.slice(0, 3));
-      if (openFoodFactsData.categories) autoTags.push(...openFoodFactsData.categories.slice(0, 2));
-    }
-
-    // Prepare suggested data for frontend
-    const suggestedData = {
-      name: openFoodFactsData?.found ? openFoodFactsData.name : `Product ${barcode}`,
-      description: openFoodFactsData?.found ? openFoodFactsData.description : 'Product description',
-      price: 0, // Must be set manually
-      category: matchedCategoryId,
-      unit: extractedUnit,
-      unitSize: extractedUnitSize,
-      stock: 0, // Must be set manually
-      milkType: extractedMilkType,
-      nutritionalInfo: openFoodFactsData?.found ? openFoodFactsData.nutritionalInfo : {},
-      tags: autoTags.join(', '),
-      discount: 0,
-      isFeatured: false,
-      scannedBarcodeId: barcode
-    };
-
-    // 7️⃣ ALWAYS return data to frontend for confirmation - NEVER create automatically
-    console.log('📋 Returning data to frontend for confirmation');
-    
-    const response = {
-      success: true,
-      message: openFoodFactsData?.found 
-        ? 'Product data found! Please confirm and fill missing fields.' 
-        : 'No product data found. Please create manually.',
-      openFoodFactsData: {
-        found: openFoodFactsData?.found || false,
-        barcode: barcode,
-        name: suggestedData.name,
-        description: suggestedData.description,
-        brand: openFoodFactsData?.brand || '',
-        categories: openFoodFactsData?.categories || [],
-        quantity: openFoodFactsData?.quantity || '',
-        unit: suggestedData.unit,
-        unitSize: suggestedData.unitSize,
-        nutritionalInfo: suggestedData.nutritionalInfo,
-        images: openFoodFactsData?.images || []
-      },
-      suggestedData: suggestedData,
-      imageInfo: {
-        totalDownloaded: uploadedImages.length,
-        images: uploadedImages
-      },
-      requiresConfirmation: true,
-      autoFilledFields: {
-        name: openFoodFactsData?.found,
-        description: !!(openFoodFactsData?.found && openFoodFactsData.description),
-        category: !!matchedCategoryId,
-        unit: true,
-        unitSize: true,
-        milkType: true,
-        tags: autoTags.length > 0,
-        nutritionalInfo: !!(openFoodFactsData?.found && openFoodFactsData.nutritionalInfo),
-        images: uploadedImages.length > 0
-      },
-      missingRequiredFields: {
-        price: true, // Always required
-        stock: true, // Always required
-        category: !matchedCategoryId // Only if no category matched
-      }
-    };
-
-    // Add available categories if needed for frontend
-    if (!matchedCategoryId) {
-      response.availableCategories = allCategories.map(cat => ({ _id: cat._id, name: cat.name }));
-    }
-
-    res.status(200).json(response);
-
-  } catch (error) {
-    console.error('❌ Create Product from Barcode Error:', error);
-    
-    res.status(500).json({
-      success: false,
-      message: 'Server error during barcode scanning',
-      error: error.message
-    });
-  }
-};
-
 export const scanBarcodeForProductData = async (req, res) => {
   try {
     const { barcode } = req.body;
 
-    console.log('=== BARCODE SCAN FOR PRODUCT DATA ===');
+    console.log('=== ENHANCED BARCODE SCAN FOR PRODUCT DATA ===');
     console.log('📦 Scanning barcode:', barcode);
 
     // 1️⃣ Validate barcode
-    if (!barcode || barcode.trim() === '') {
+    if (!barcode || typeof barcode !== 'string' || barcode.trim() === '') {
       return res.status(400).json({
         success: false,
         message: 'Barcode is required',
@@ -1803,24 +1636,16 @@ export const scanBarcodeForProductData = async (req, res) => {
       });
     }
 
-    // 2️⃣ Check if barcode already exists
-    const existingProduct = await Product.findOne({
-      $and: [
-        { isAvailable: true },
-        {
-          $or: [
-            { scannedBarcodeId: barcode.trim() },
-            { barcodeId: barcode.trim() }
-          ]
-        }
-      ]
-    }).select('name price category image scannedBarcodeId barcodeId').populate('category', 'name');
+    const cleanBarcode = barcode.trim();
 
-    if (existingProduct) {
+    // 2️⃣ Check if barcode is already assigned to any product
+    const { isUnique, existingProduct } = await checkBarcodeUniqueness(cleanBarcode);
+
+    if (!isUnique && existingProduct) {
       console.log('✅ Found existing product with barcode:', existingProduct.name);
       return res.status(200).json({
         success: true,
-        message: 'Product already exists with this barcode',
+        message: 'Barcode already assigned to existing product',
         productExists: true,
         existingProduct: {
           _id: existingProduct._id,
@@ -1828,9 +1653,12 @@ export const scanBarcodeForProductData = async (req, res) => {
           price: existingProduct.price,
           category: existingProduct.category,
           image: existingProduct.image,
-          barcodeType: existingProduct.scannedBarcodeId === barcode.trim() ? 'scanned' : 'generated'
+          barcodeType: existingProduct.scannedBarcodeId === cleanBarcode ? 'scanned' : 'generated',
+          scannedBarcodeId: existingProduct.scannedBarcodeId,
+          barcodeId: existingProduct.barcodeId
         },
-        action: 'EDIT_EXISTING'
+        action: 'EDIT_EXISTING',
+        scannedBarcode: cleanBarcode
       });
     }
 
@@ -1843,9 +1671,9 @@ export const scanBarcodeForProductData = async (req, res) => {
     
     try {
       console.log('🔍 Fetching from OpenFoodFacts...');
-      openFoodFactsData = await openFoodFactsService.getProductByBarcode(barcode);
+      openFoodFactsData = await openFoodFactsService.getProductByBarcode(cleanBarcode);
       
-      // 🎯 FIX: Download images immediately during scan
+      // Download images immediately during scan
       if (openFoodFactsData?.found && openFoodFactsData.images.length > 0) {
         console.log('📸 Downloading product images immediately...');
         downloadedImages = await openFoodFactsService.downloadAndUploadImages(
@@ -1874,7 +1702,7 @@ export const scanBarcodeForProductData = async (req, res) => {
       discount: 0,
       isFeatured: false,
       isAvailable: true,
-      scannedBarcodeId: barcode.trim()
+      scannedBarcodeId: cleanBarcode
     };
 
     const autoFilledFields = {
@@ -1911,7 +1739,7 @@ export const scanBarcodeForProductData = async (req, res) => {
 
       suggestedData = {
         ...suggestedData,
-        name: openFoodFactsData.name || `Product ${barcode}`,
+        name: openFoodFactsData.name || `Product ${cleanBarcode}`,
         description: openFoodFactsData.description || '',
         unit: extractedUnit,
         unitSize: extractedUnitSize,
@@ -1931,7 +1759,7 @@ export const scanBarcodeForProductData = async (req, res) => {
       autoFilledFields.nutritionalInfo = !!(openFoodFactsData.nutritionalInfo && 
         Object.keys(openFoodFactsData.nutritionalInfo).length > 0);
     } else {
-      suggestedData.name = `Product ${barcode}`;
+      suggestedData.name = `Product ${cleanBarcode}`;
       autoFilledFields.name = true;
     }
 
@@ -1943,17 +1771,17 @@ export const scanBarcodeForProductData = async (req, res) => {
       unit: !suggestedData.unit
     };
 
-    // 8️⃣ 🎯 FIX: Include downloaded Cloudinary images directly
+    // 8️⃣ Return response with scanned barcode
     const response = {
       success: true,
       message: openFoodFactsData?.found 
         ? 'Product data found! Review and complete the information below.' 
         : 'No product data found online. Please fill in the product details manually.',
       dataSource: openFoodFactsData?.found ? 'openfoodfacts' : 'manual',
-      scannedBarcode: barcode.trim(),
+      scannedBarcode: cleanBarcode,
       openFoodFactsData: {
         found: openFoodFactsData?.found || false,
-        barcode: barcode,
+        barcode: cleanBarcode,
         name: suggestedData.name,
         description: suggestedData.description,
         brand: openFoodFactsData?.brand || '',
@@ -1964,10 +1792,9 @@ export const scanBarcodeForProductData = async (req, res) => {
         nutritionalInfo: suggestedData.nutritionalInfo
       },
       suggestedData: suggestedData,
-      // 🎯 FIX: Send downloaded Cloudinary images directly
       imageInfo: {
         totalDownloaded: downloadedImages.length,
-        images: downloadedImages // Already uploaded to Cloudinary
+        images: downloadedImages
       },
       autoFilledFields,
       missingRequiredFields,
@@ -1975,7 +1802,7 @@ export const scanBarcodeForProductData = async (req, res) => {
       availableCategories: allCategories.map(cat => ({ _id: cat._id, name: cat.name }))
     };
 
-    console.log('✅ Returning product data with', downloadedImages.length, 'images');
+    console.log('✅ Returning product data with barcode:', cleanBarcode);
     res.status(200).json(response);
 
   } catch (error) {
@@ -1989,7 +1816,7 @@ export const scanBarcodeForProductData = async (req, res) => {
   }
 };
 
-// @desc    Create product with scanned barcode data
+// @desc    Create product with scanned barcode data (FIXED BARCODE ASSIGNMENT)
 // @route   POST /api/catalog/products/create-from-scan
 // @access  Private (Admin)
 export const createProductFromScanData = async (req, res) => {
@@ -2008,13 +1835,12 @@ export const createProductFromScanData = async (req, res) => {
       discount,
       isFeatured,
       scannedBarcodeId,
-      images // Array of image URLs from OpenFoodFacts
+      images
     } = req.body;
 
     console.log('=== CREATING PRODUCT FROM SCAN DATA ===');
     console.log('📦 Product:', name);
-    console.log('📦 Barcode:', scannedBarcodeId);
-    console.log('📦 Images received:', images?.length || 0);
+    console.log('📦 Barcode to assign:', scannedBarcodeId);
 
     // 1️⃣ Validate required fields
     if (!name || !name.trim()) {
@@ -2049,22 +1875,17 @@ export const createProductFromScanData = async (req, res) => {
       });
     }
 
-    // 2️⃣ Check if barcode is already used
+    // 2️⃣ Check if barcode is already used using helper function
     if (scannedBarcodeId) {
-      const existingBarcode = await Product.findOne({
-        $or: [
-          { scannedBarcodeId: scannedBarcodeId.trim() },
-          { barcodeId: scannedBarcodeId.trim() }
-        ]
-      });
-
-      if (existingBarcode) {
+      const { isUnique, existingProduct } = await checkBarcodeUniqueness(scannedBarcodeId);
+      
+      if (!isUnique) {
         return res.status(400).json({
           success: false,
           message: 'This barcode is already assigned to another product',
           existingProduct: {
-            id: existingBarcode._id,
-            name: existingBarcode.name
+            id: existingProduct._id,
+            name: existingProduct.name
           }
         });
       }
@@ -2094,7 +1915,7 @@ export const createProductFromScanData = async (req, res) => {
       });
     }
 
-    // 5️⃣ 🎯 FIX: Handle images properly - Use Cloudinary URLs directly
+    // 5️⃣ Handle images
     let mainImageUrl = '/images/default-product.jpg';
     let additionalImages = [];
 
@@ -2103,7 +1924,7 @@ export const createProductFromScanData = async (req, res) => {
     if (images && images.length > 0) {
       console.log('📸 Images available:', images.length);
       
-      // Use first image as main image (already uploaded to Cloudinary)
+      // Use first image as main image
       const firstImage = images[0];
       if (firstImage && firstImage.url) {
         mainImageUrl = firstImage.url;
@@ -2132,8 +1953,8 @@ export const createProductFromScanData = async (req, res) => {
       ? JSON.parse(nutritionalInfo) 
       : (nutritionalInfo || {});
 
-    // 8️⃣ Create product (FAST - no image uploads during creation)
-    console.log('🚀 Creating product in database...');
+    // 8️⃣ Create product with scanned barcode
+    console.log('🚀 Creating product in database with barcode:', scannedBarcodeId);
     
     const product = new Product({
       name: name.trim(),
@@ -2145,7 +1966,7 @@ export const createProductFromScanData = async (req, res) => {
       stock: Number(stock) || 0,
       milkType: milkType || 'Cow',
       image: mainImageUrl,
-      imagePublicId: null, // 🎯 No publicId for Cloudinary URLs from OpenFoodFacts
+      imagePublicId: null,
       images: additionalImages,
       nutritionalInfo: formattedNutritionalInfo,
       tags: formattedTags,
@@ -2156,22 +1977,23 @@ export const createProductFromScanData = async (req, res) => {
     });
 
     await product.save();
-    console.log('✅ Product saved to database');
+    console.log('✅ Product saved to database with barcode assignment');
 
     await product.populate('category', 'name');
     console.log('✅ Product populated with category');
 
-    // 9️⃣ Return created product immediately
+    // 9️⃣ Return created product
     const createdProduct = await Product.findById(product._id)
       .populate('category', 'name');
 
-    console.log('🎉 Product creation completed successfully');
+    console.log('🎉 Product creation completed successfully with barcode:', scannedBarcodeId);
 
     res.status(201).json({
       success: true,
       message: 'Product created successfully!',
       product: createdProduct,
-      barcodeAssigned: !!scannedBarcodeId
+      barcodeAssigned: !!scannedBarcodeId,
+      assignedBarcode: scannedBarcodeId
     });
 
   } catch (error) {
@@ -2198,29 +2020,81 @@ export const createProductFromScanData = async (req, res) => {
   }
 };
 
-// 🎯 CRITICAL: Unified barcode lookup for offline orders
+// @desc    Create product from scanned barcode (Legacy endpoint - enhanced)
+// @route   POST /api/catalog/products/scan-create
+// @access  Private (Admin)
+export const createProductFromBarcode = async (req, res) => {
+  try {
+    const { barcode } = req.body;
+
+    console.log('=== LEGACY BARCODE PRODUCT CREATION ===');
+    console.log('📦 Barcode:', barcode);
+
+    // 1️⃣ Validate barcode
+    if (!barcode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode is required'
+      });
+    }
+
+    // 2️⃣ Check if barcode is already assigned
+    const { isUnique, existingProduct } = await checkBarcodeUniqueness(barcode);
+
+    if (!isUnique) {
+      return res.status(200).json({
+        success: true,
+        message: 'Barcode already assigned to existing product',
+        productExists: true,
+        existingProduct: {
+          id: existingProduct._id,
+          name: existingProduct.name
+        }
+      });
+    }
+
+    // 3️⃣ Return data for frontend confirmation
+    const response = {
+      success: true,
+      message: 'Barcode is available for product creation',
+      scannedBarcode: barcode,
+      requiresConfirmation: true
+    };
+
+    res.status(200).json(response);
+
+  } catch (error) {
+    console.error('❌ Create Product from Barcode Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during barcode scanning',
+      error: error.message
+    });
+  }
+};
+
+// @desc    Unified barcode lookup for offline orders
+// @route   GET /api/catalog/products/barcode-lookup/:barcodeId
+// @access  Public
 export const getProductByAnyBarcode = async (req, res) => {
   try {
     const { barcodeId } = req.params;
     
     console.log('🔍 Unified barcode lookup for:', barcodeId);
 
-    // 1. First try: Search by scanned barcode
-    let product = await Product.findOne({ 
-      scannedBarcodeId: barcodeId 
+    // Search by both barcode types
+    const product = await Product.findOne({
+      $and: [
+        { isAvailable: true },
+        {
+          $or: [
+            { scannedBarcodeId: barcodeId },
+            { barcodeId: barcodeId },
+            { _id: barcodeId }
+          ]
+        }
+      ]
     }).populate('category');
-
-    // 2. Second try: Search by generated barcode
-    if (!product) {
-      product = await Product.findOne({ 
-        barcodeId: barcodeId 
-      }).populate('category');
-    }
-
-    // 3. Third try: Search by product ID (for generated barcodes using product ID)
-    if (!product) {
-      product = await Product.findById(barcodeId).populate('category');
-    }
 
     if (!product) {
       return res.status(404).json({
@@ -2269,7 +2143,9 @@ export const getProductByAnyBarcode = async (req, res) => {
   }
 };
 
-// 🎯 Alternative: Simple barcode search
+// @desc    Simple barcode search
+// @route   GET /api/catalog/products/search-barcode/:barcodeId
+// @access  Public
 export const searchProductByBarcode = async (req, res) => {
   try {
     const { barcodeId } = req.params;
@@ -2281,7 +2157,7 @@ export const searchProductByBarcode = async (req, res) => {
       $or: [
         { barcodeId: barcodeId },
         { scannedBarcodeId: barcodeId },
-        { _id: barcodeId } // Also try as product ID
+        { _id: barcodeId }
       ]
     }).populate('category');
 
@@ -2327,7 +2203,7 @@ export const downloadAndProcessImages = async (req, res) => {
 
     const downloadedImages = [];
 
-    // 🎯 FIX: Remove duplicate URLs before processing
+    // Remove duplicate URLs before processing
     const uniqueImageUrls = [...new Set(imageUrls.map(img => 
       typeof img === 'string' ? img : img.url
     ))];
@@ -2359,7 +2235,7 @@ export const downloadAndProcessImages = async (req, res) => {
           `dairy9/products/scanned/${barcode}`
         );
 
-        // 🎯 FIX: Preserve image type information
+        // Preserve image type information
         const originalImage = imageUrls.find(img => 
           (typeof img === 'string' ? img : img.url) === imageUrl
         );
@@ -2377,7 +2253,6 @@ export const downloadAndProcessImages = async (req, res) => {
 
       } catch (error) {
         console.error(`❌ Error processing image ${i + 1}:`, error.message);
-        // Continue with other images
       }
     }
 
