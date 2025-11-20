@@ -18,6 +18,7 @@ import {generateProductBarcode,removeScannedBarcode,deleteGeneratedBarcode,getPr
 
 import {scanAndAssignBarcode,updateProductBarcode,removeProductBarcode} from '../controllers/product.controller.js';
 import {getProductById} from '../controllers/product.controller.js';
+import { generateInvoice } from '../controllers/invoice.controller.js';
 const router = express.Router();
 
 // Test endpoint
@@ -53,6 +54,7 @@ router.post('/stock-orders/:id/release-lock', releaseStockOrderLock);
 router.post('/stock-orders/:id/action', superAdminActOnOrder); // approve/fulfill/reject/partial
 router.get('/stock-orders/:id/transactions', getStockOrderTransactions);
 router.post('/stock-orders/:id/notes', addNoteToStockOrder); // both sides can add notes
+router.get('/orders/:id/invoice', generateInvoice); // Keep existing
 
 
 // Customers
