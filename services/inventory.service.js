@@ -1,13 +1,142 @@
-// services/inventory.service.js - COMPLETE FIXED VERSION
+// services/inventory.service.js - COMPLETE UPDATED VERSION WITH REVENUE CALCULATION
 import RetailerInventory from '../models/retailerInventory.model.js';
 import InventoryLog from '../models/inventoryLog.model.js';
 import Product from '../models/product.model.js';
+import Order from '../models/order.model.js';
 import mongoose from 'mongoose';
 import CacheService from './cache.service.js';
 
 class InventoryService {
     constructor() {
         this.batchSize = 50;
+    }
+
+    /**
+     * Calculate revenue metrics from ORDERS (SIMPLE & ACCURATE APPROACH)
+     */
+    async calculateRevenueMetrics(retailerId, timeFilter = 'all') {
+        try {
+            const { startDate, endDate } = this.getDateRange(timeFilter);
+            
+            console.log(`💰 Calculating revenue for retailer ${retailerId} from ${startDate} to ${endDate}`);
+
+            // Get all DELIVERED orders (completed transactions) within date range
+            const deliveredOrders = await Order.find({
+                assignedRetailer: retailerId,
+                orderStatus: 'delivered',
+                deliveredAt: {
+                    $gte: startDate,
+                    $lte: endDate
+                }
+            }).populate('items.product', 'name category');
+
+            console.log(`📦 Found ${deliveredOrders.length} delivered orders for revenue calculation`);
+
+            // Calculate metrics from actual orders
+            return this.calculateMetricsFromOrders(deliveredOrders);
+
+        } catch (error) {
+            console.error('Revenue calculation error:', error);
+            return this.getDefaultRevenueMetrics();
+        }
+    }
+
+    /**
+     * Calculate metrics directly from order data
+     */
+    calculateMetricsFromOrders(orders) {
+        let totalSales = 0;
+        let totalRevenue = 0;
+        let totalItemsSold = 0;
+        let totalDiscount = 0;
+        
+        orders.forEach(order => {
+            // Use FINAL amount from order (this includes all overrides and discounts)
+            const orderTotal = order.finalAmount || order.totalAmount || 0;
+            totalSales += orderTotal;
+
+            // Calculate revenue (sales - cost)
+            let orderRevenue = 0;
+            let orderItemsSold = 0;
+
+            order.items.forEach(item => {
+                const quantity = item.quantity || 0;
+                const sellingPrice = item.price || 0; // ACTUAL charged price
+                const costPrice = item.costPrice || sellingPrice * 0.7; // Estimate cost if not available
+                
+                orderItemsSold += quantity;
+                
+                // Revenue = (Selling Price - Cost Price) * Quantity
+                const itemRevenue = (sellingPrice - costPrice) * quantity;
+                orderRevenue += itemRevenue;
+            });
+
+            totalRevenue += orderRevenue;
+            totalItemsSold += orderItemsSold;
+            totalDiscount += order.discount || 0;
+        });
+
+        // Calculate averages and percentages
+        const averageOrderValue = orders.length > 0 ? totalSales / orders.length : 0;
+        const profitMargin = totalSales > 0 ? (totalRevenue / totalSales) * 100 : 0;
+
+        return {
+            totalSales: Math.round(totalSales * 100) / 100,
+            totalRevenue: Math.round(totalRevenue * 100) / 100,
+            totalItemsSold,
+            totalDiscount: Math.round(totalDiscount * 100) / 100,
+            averageOrderValue: Math.round(averageOrderValue * 100) / 100,
+            profitMargin: Math.round(profitMargin * 100) / 100,
+            totalOrders: orders.length
+        };
+    }
+
+    /**
+     * Get date range based on time filter
+     */
+    getDateRange(timeFilter) {
+        const now = new Date();
+        let startDate = new Date('2020-01-01');
+        let endDate = new Date();
+
+        switch (timeFilter) {
+            case 'today':
+                startDate = new Date(now.setHours(0, 0, 0, 0));
+                break;
+            case 'week':
+                startDate = new Date(now.setDate(now.getDate() - 7));
+                break;
+            case 'month':
+                startDate = new Date(now.setMonth(now.getMonth() - 1));
+                break;
+            case '3months':
+                startDate = new Date(now.setMonth(now.getMonth() - 3));
+                break;
+            case '6months':
+                startDate = new Date(now.setMonth(now.getMonth() - 6));
+                break;
+            case 'year':
+                startDate = new Date(now.setFullYear(now.getFullYear() - 1));
+                break;
+            case 'all':
+            default:
+                startDate = new Date('2020-01-01');
+                break;
+        }
+
+        return { startDate, endDate };
+    }
+
+    getDefaultRevenueMetrics() {
+        return {
+            totalSales: 0,
+            totalRevenue: 0,
+            totalItemsSold: 0,
+            totalDiscount: 0,
+            averageOrderValue: 0,
+            profitMargin: 0,
+            totalOrders: 0
+        };
     }
 
     /**
@@ -342,7 +471,7 @@ class InventoryService {
     }
 
     /**
-     * Get retailer inventory with filters and caching - FIXED CALCULATIONS
+     * Get retailer inventory with REVENUE-BASED calculations
      */
     async getRetailerInventory(retailerId, filters = {}) {
         try {
@@ -360,7 +489,8 @@ class InventoryService {
                 lowStock,
                 outOfStock,
                 sortBy = 'product.name',
-                sortOrder = 'asc'
+                sortOrder = 'asc',
+                timeFilter = 'all' // NEW: Time filter for revenue context
             } = filters;
 
             let query = { retailer: retailerId, isActive: true };
@@ -428,9 +558,11 @@ class InventoryService {
                 };
             });
 
-            // FIXED: Calculate summary stats using JavaScript for accurate calculations
+            // 🔥 REVENUE-BASED CALCULATIONS: Get metrics from ORDERS
+            const revenueMetrics = await this.calculateRevenueMetrics(retailerId, timeFilter);
+
+            // Calculate inventory-specific metrics
             let totalInventoryValue = 0;
-            let totalSalesValue = 0;
             let lowStockCount = 0;
             let outOfStockCount = 0;
 
@@ -439,10 +571,6 @@ class InventoryService {
                 const itemSellingPrice = item.sellingPrice || 0;
                 const itemInventoryValue = itemCurrentStock * itemSellingPrice;
                 totalInventoryValue += itemInventoryValue;
-
-                const itemTotalSold = item.totalSold || 0;
-                const itemSalesValue = itemTotalSold * itemSellingPrice;
-                totalSalesValue += itemSalesValue;
 
                 const availableStock = itemCurrentStock - (item.committedStock || 0);
                 if (availableStock <= (item.minStockLevel || 0)) {
@@ -458,17 +586,26 @@ class InventoryService {
                 inventory: formattedInventory,
                 summary: {
                     totalProducts: formattedInventory.length,
-                    totalInventoryValue,
-                    totalSalesValue,
+                    totalInventoryValue: Math.round(totalInventoryValue * 100) / 100,
+                    // 🔥 USE ACTUAL REVENUE FROM ORDERS
+                    totalSales: revenueMetrics.totalSales,
+                    totalRevenue: revenueMetrics.totalRevenue,
                     lowStockCount,
                     outOfStockCount,
-                    totalValue: totalInventoryValue
+                    // Additional revenue metrics
+                    totalItemsSold: revenueMetrics.totalItemsSold,
+                    profitMargin: revenueMetrics.profitMargin,
+                    averageOrderValue: revenueMetrics.averageOrderValue
                 },
                 pagination: {
                     currentPage: parseInt(page),
                     totalPages: Math.ceil(total / limit),
                     totalItems: total,
                     itemsPerPage: parseInt(limit)
+                },
+                revenueContext: {
+                    timeFilter,
+                    period: this.getDateRange(timeFilter)
                 }
             };
 
@@ -593,10 +730,10 @@ class InventoryService {
                 throw new Error('Inventory item not found');
             }
 
-            // Update allowed fields
+            // Update allowed fields including pricing slabs
             const allowedFields = [
-                'sellingPrice', 'costPrice', 'minStockLevel',
-                'maxStockLevel', 'reorderQuantity', 'isActive'
+                'sellingPrice', 'costPrice', 'minStockLevel', 'maxStockLevel',
+                'enableQuantityPricing', 'pricingSlabs'
             ];
 
             allowedFields.forEach(field => {
@@ -605,57 +742,32 @@ class InventoryService {
                 }
             });
 
+            // Validate pricing slabs if enabled
+            if (updateData.enableQuantityPricing && updateData.pricingSlabs) {
+                this.validatePricingSlabs(updateData.pricingSlabs);
+            }
+
             await inventoryItem.save({ session });
             savedInventoryItemId = inventoryItem._id;
 
-            // Create log for price changes - USE VALID REASON VALUES
-            if (updateData.sellingPrice !== undefined || updateData.costPrice !== undefined) {
-                let reason = 'CORRECTION';
-                let notes = 'Price settings updated';
-                
-                if (updateData.sellingPrice !== undefined && updateData.costPrice !== undefined) {
-                    notes = `Selling price updated to ${updateData.sellingPrice}, Cost price updated to ${updateData.costPrice}`;
-                } else if (updateData.sellingPrice !== undefined) {
-                    notes = `Selling price updated to ${updateData.sellingPrice}`;
-                } else if (updateData.costPrice !== undefined) {
-                    notes = `Cost price updated to ${updateData.costPrice}`;
-                }
-
-                const inventoryLog = new InventoryLog({
-                    retailer: retailerId,
-                    product: inventoryItem.product,
-                    inventoryItem: inventoryItem._id,
-                    transactionType: 'STOCK_ADJUSTMENT',
-                    quantity: 0,
-                    previousStock: inventoryItem.currentStock,
-                    newStock: inventoryItem.currentStock,
-                    reason: reason,
-                    notes: notes,
-                    createdBy: userId
-                });
-                await inventoryLog.save({ session });
-            }
-
-            // Create log for stock level adjustments
-            if (updateData.minStockLevel !== undefined || updateData.maxStockLevel !== undefined) {
-                const inventoryLog = new InventoryLog({
-                    retailer: retailerId,
-                    product: inventoryItem.product,
-                    inventoryItem: inventoryItem._id,
-                    transactionType: 'STOCK_ADJUSTMENT',
-                    quantity: 0,
-                    previousStock: inventoryItem.currentStock,
-                    newStock: inventoryItem.currentStock,
-                    reason: 'SYSTEM_ADJUSTMENT',
-                    notes: 'Stock level settings updated',
-                    createdBy: userId
-                });
-                await inventoryLog.save({ session });
-            }
+            // Create comprehensive log
+            const inventoryLog = new InventoryLog({
+                retailer: retailerId,
+                product: inventoryItem.product,
+                inventoryItem: inventoryItem._id,
+                transactionType: 'STOCK_ADJUSTMENT',
+                quantity: 0,
+                previousStock: inventoryItem.currentStock,
+                newStock: inventoryItem.currentStock,
+                reason: 'SETTINGS_UPDATE',
+                notes: `Product settings updated - Price: ₹${inventoryItem.sellingPrice}, Quantity Pricing: ${inventoryItem.enableQuantityPricing ? 'Enabled' : 'Disabled'}`,
+                createdBy: userId
+            });
+            await inventoryLog.save({ session });
 
             await session.commitTransaction();
 
-            // ✅ FIX: Session end hone ke baad hi database call karo
+            // Get updated inventory item
             const result = await RetailerInventory.findById(savedInventoryItemId)
                 .populate('product', 'name sku unit unitSize image');
 
@@ -934,11 +1046,11 @@ class InventoryService {
     }
 
     /**
-     * Get inventory analytics with correct calculations
+     * Get inventory analytics with REVENUE-BASED calculations
      */
-    async getInventoryAnalytics(retailerId) {
+    async getInventoryAnalytics(retailerId, timeFilter = 'all') {
         try {
-            const inventoryData = await this.getRetailerInventory(retailerId, { limit: 1000 }); // Get all inventory
+            const inventoryData = await this.getRetailerInventory(retailerId, { limit: 1000, timeFilter });
             const recentLogs = await this.getInventoryLogs(retailerId, { limit: 10 });
             const lowStockAlerts = await this.getLowStockAlerts(retailerId);
 
@@ -1049,16 +1161,17 @@ class InventoryService {
     }
 
     /**
-     * Get inventory statistics for dashboard
+     * Get inventory statistics for dashboard WITH REVENUE
      */
-    async getInventoryDashboardStats(retailerId) {
+    async getInventoryDashboardStats(retailerId, timeFilter = 'all') {
         try {
+            const revenueMetrics = await this.calculateRevenueMetrics(retailerId, timeFilter);
+            
             const [
                 totalProducts,
                 lowStockItems,
                 outOfStockItems,
-                recentActivity,
-                inventoryValue
+                recentActivity
             ] = await Promise.all([
                 RetailerInventory.countDocuments({ retailer: retailerId, isActive: true }),
                 RetailerInventory.countDocuments({ 
@@ -1075,18 +1188,36 @@ class InventoryService {
                     .populate('product', 'name')
                     .sort({ createdAt: -1 })
                     .limit(5)
-                    .lean(),
-                this.getRetailerInventory(retailerId, { limit: 1000 })
+                    .lean()
             ]);
+
+            // Calculate inventory value
+            const inventoryItems = await RetailerInventory.find({ 
+                retailer: retailerId, 
+                isActive: true 
+            });
+            
+            let totalInventoryValue = 0;
+            inventoryItems.forEach(item => {
+                totalInventoryValue += (item.currentStock || 0) * (item.sellingPrice || 0);
+            });
 
             return {
                 totalProducts,
                 lowStockItems,
                 outOfStockItems,
                 recentActivity,
-                totalInventoryValue: inventoryValue.summary?.totalInventoryValue || 0,
-                totalSalesValue: inventoryValue.summary?.totalSalesValue || 0,
-                timestamp: new Date()
+                totalInventoryValue: Math.round(totalInventoryValue * 100) / 100,
+                totalSales: revenueMetrics.totalSales,
+                totalRevenue: revenueMetrics.totalRevenue,
+                totalItemsSold: revenueMetrics.totalItemsSold,
+                profitMargin: revenueMetrics.profitMargin,
+                averageOrderValue: revenueMetrics.averageOrderValue,
+                timestamp: new Date(),
+                timePeriod: {
+                    filter: timeFilter,
+                    ...this.getDateRange(timeFilter)
+                }
             };
         } catch (error) {
             console.error('Get dashboard stats error:', error);
@@ -1106,7 +1237,212 @@ class InventoryService {
             return [];
         }
     }
+
+    /**
+     * Update pricing slabs for an inventory item
+     */
+    async updatePricingSlabs(inventoryId, retailerId, pricingSlabs, userId) {
+        const session = await mongoose.startSession();
+        let savedInventoryItemId = null;
+
+        try {
+            session.startTransaction();
+
+            const inventoryItem = await RetailerInventory.findOne({
+                _id: inventoryId,
+                retailer: retailerId
+            }).session(session);
+
+            if (!inventoryItem) {
+                throw new Error('Inventory item not found');
+            }
+
+            // Validate pricing slabs
+            this.validatePricingSlabs(pricingSlabs);
+
+            // Update pricing slabs
+            inventoryItem.pricingSlabs = pricingSlabs;
+            inventoryItem.enableQuantityPricing = pricingSlabs.length > 0;
+            inventoryItem.updatedBy = userId;
+
+            await inventoryItem.save({ session });
+            savedInventoryItemId = inventoryItem._id;
+
+            // Create log for pricing changes
+            const inventoryLog = new InventoryLog({
+                retailer: retailerId,
+                product: inventoryItem.product,
+                inventoryItem: inventoryItem._id,
+                transactionType: 'STOCK_ADJUSTMENT',
+                quantity: 0,
+                previousStock: inventoryItem.currentStock,
+                newStock: inventoryItem.currentStock,
+                reason: 'PRICING_UPDATE',
+                notes: `Quantity-based pricing slabs updated - ${pricingSlabs.length} slabs configured`,
+                createdBy: userId
+            });
+            await inventoryLog.save({ session });
+
+            await session.commitTransaction();
+
+            // Get updated inventory item
+            const result = await RetailerInventory.findById(savedInventoryItemId)
+                .populate('product', 'name sku unit unitSize image');
+
+            // Invalidate cache
+            await CacheService.invalidateInventoryCache(retailerId);
+
+            return result;
+
+        } catch (error) {
+            await session.abortTransaction();
+            throw error;
+        } finally {
+            await session.endSession();
+        }
+    }
+
+    /**
+     * Validate pricing slabs
+     */
+    validatePricingSlabs(pricingSlabs) {
+        if (!Array.isArray(pricingSlabs)) {
+            throw new Error('Pricing slabs must be an array');
+        }
+
+        // Check for overlapping ranges and validate each slab
+        const sortedSlabs = [...pricingSlabs].sort((a, b) => a.minQuantity - b.minQuantity);
+        
+        for (let i = 0; i < sortedSlabs.length; i++) {
+            const slab = sortedSlabs[i];
+            
+            // Validate individual slab
+            if (slab.minQuantity < 0) {
+                throw new Error(`Slab ${i + 1}: minQuantity cannot be negative`);
+            }
+            if (slab.maxQuantity <= slab.minQuantity) {
+                throw new Error(`Slab ${i + 1}: maxQuantity must be greater than minQuantity`);
+            }
+            if (slab.discountValue < 0) {
+                throw new Error(`Slab ${i + 1}: discountValue cannot be negative`);
+            }
+            if (!['FLAT', 'PERCENTAGE'].includes(slab.discountType)) {
+                throw new Error(`Slab ${i + 1}: discountType must be FLAT or PERCENTAGE`);
+            }
+            if (slab.discountType === 'PERCENTAGE' && slab.discountValue > 100) {
+                throw new Error(`Slab ${i + 1}: percentage discount cannot exceed 100%`);
+            }
+
+            // Check for overlaps with next slab
+            if (i < sortedSlabs.length - 1) {
+                const nextSlab = sortedSlabs[i + 1];
+                if (slab.maxQuantity >= nextSlab.minQuantity) {
+                    throw new Error(`Slab ${i + 1} and ${i + 2} have overlapping quantity ranges`);
+                }
+            }
+        }
+    }
+
+    /**
+     * Calculate price for a specific quantity
+     */
+    async calculatePriceForQuantity(retailerId, productId, quantity) {
+        try {
+            const inventoryItem = await RetailerInventory.findOne({
+                retailer: retailerId,
+                product: productId,
+                isActive: true
+            }).populate('product', 'name sku unit unitSize image');
+
+            if (!inventoryItem) {
+                throw new Error('Product not found in inventory');
+            }
+
+            const basePrice = inventoryItem.sellingPrice || 0;
+            let finalPrice = basePrice;
+            let appliedDiscount = 0;
+            let discountType = null;
+            let finalUnitPrice = basePrice;
+
+            if (inventoryItem.enableQuantityPricing && inventoryItem.pricingSlabs) {
+                const applicableSlab = inventoryItem.pricingSlabs
+                    .filter(slab => slab.isActive)
+                    .sort((a, b) => a.minQuantity - b.minQuantity)
+                    .find(slab => quantity >= slab.minQuantity && quantity <= slab.maxQuantity);
+
+                if (applicableSlab) {
+                    const totalPrice = basePrice * quantity;
+                    
+                    if (applicableSlab.discountType === 'FLAT') {
+                        appliedDiscount = applicableSlab.discountValue;
+                        finalPrice = Math.max(0, totalPrice - appliedDiscount);
+                        finalUnitPrice = finalPrice / quantity;
+                    } else if (applicableSlab.discountType === 'PERCENTAGE') {
+                        appliedDiscount = (totalPrice * applicableSlab.discountValue) / 100;
+                        finalPrice = Math.max(0, totalPrice - appliedDiscount);
+                        finalUnitPrice = finalPrice / quantity;
+                    }
+                    discountType = applicableSlab.discountType;
+                }
+            }
+
+            return {
+                productId,
+                productName: inventoryItem.productName,
+                quantity,
+                basePrice,
+                finalPrice: Math.round(finalPrice * 100) / 100,
+                finalUnitPrice: Math.round(finalUnitPrice * 100) / 100,
+                appliedDiscount: Math.round(appliedDiscount * 100) / 100,
+                discountType,
+                hasQuantityPricing: inventoryItem.enableQuantityPricing,
+                pricingSlabs: inventoryItem.enableQuantityPricing ? inventoryItem.pricingSlabs : []
+            };
+        } catch (error) {
+            console.error('Calculate price error:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Bulk calculate prices for multiple products
+     */
+    async bulkCalculatePrices(retailerId, items) {
+        try {
+            const results = [];
+
+            for (const item of items) {
+                try {
+                    const priceInfo = await this.calculatePriceForQuantity(
+                        retailerId, 
+                        item.productId, 
+                        item.quantity
+                    );
+                    results.push({
+                        ...item,
+                        success: true,
+                        priceInfo
+                    });
+                } catch (error) {
+                    results.push({
+                        ...item,
+                        success: false,
+                        error: error.message
+                    });
+                }
+            }
+
+            return {
+                success: true,
+                results,
+                timestamp: new Date()
+            };
+        } catch (error) {
+            console.error('Bulk calculate prices error:', error);
+            throw error;
+        }
+    }
 }
 
 // ✅ IMPORTANT: Export as default instance
-export default new InventoryService();
+export default new InventoryService();   //TEJAS

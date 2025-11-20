@@ -1,10 +1,8 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\controllers\auth.controller.js
-
 import User from '../models/user.model.js';
 import Customer from '../models/customer.model.js';
 import Admin from '../models/admin.model.js';
 import jwt from 'jsonwebtoken';
-import { assignNearestRetailer } from '../utils/retailerAssignment.js'; // NEW
+import bcrypt from 'bcryptjs';
 
 // Helper function to generate OTP
 const generateOTP = () => {
@@ -194,70 +192,14 @@ export async function signup(req, res) {
 // @desc    Send OTP to existing user
 // @route   POST /api/auth/send-otp
 // @access  Public
-// export async function sendOTP(req, res) {
-//   try {
-//     const { phone } = req.body;
-    
-//     if (!phone) {
-//       return res.status(400).json({ 
-//         success: false,
-//         message: 'Phone number is required' 
-//       });
-//     }
-
-//     // Check if user exists
-//     const user = await User.findOne({ phone });
-//     if (!user) {
-//       return res.status(404).json({ 
-//         success: false,
-//         message: 'User not found. Please sign up first.' 
-//       });
-//     }
-
-//     const otpCode = generateOTP();
-//     user.otp = { 
-//       code: otpCode, 
-//       expiresAt: new Date(Date.now() + 10 * 60 * 1000)
-//     };
-//     await user.save();
-
-//     console.log(`📲 OTP for ${phone}: ${otpCode}`);
-
-//     res.status(200).json({ 
-//       success: true,
-//       message: 'OTP sent successfully' 
-//     });
-//   } catch (error) {
-//     console.error('Send OTP Error:', error);
-//     res.status(500).json({ 
-//       success: false,
-//       message: 'Server error while sending OTP'
-//     });
-//   }
-// }
-
-
-// @desc    Send OTP to existing user
-// @route   POST /api/auth/send-otp
-// @access  Public
 export async function sendOTP(req, res) {
   try {
     const { phone } = req.body;
     
-    // Validation
     if (!phone) {
       return res.status(400).json({ 
         success: false,
         message: 'Phone number is required' 
-      });
-    }
-
-    // Validate phone format (basic validation)
-    const phoneRegex = /^\+?[\d\s-()]{10,}$/;
-    if (!phoneRegex.test(phone)) {
-      return res.status(400).json({ 
-        success: false,
-        message: 'Please provide a valid phone number' 
       });
     }
 
@@ -270,47 +212,32 @@ export async function sendOTP(req, res) {
       });
     }
 
-    // Generate OTP
-    const otpCode = generateOTP(); // Make sure this function exists
-    
-    // Save OTP to user
+    const otpCode = generateOTP();
     user.otp = { 
       code: otpCode, 
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000)
     };
-    
     await user.save();
 
-    // Log OTP for testing (remove in production)
-    console.log(`📲 OTP for ${phone}: ${otpCode} (Expires: ${user.otp.expiresAt.toLocaleTimeString()})`);
-
-    // In production, you would integrate with SMS service here
-    // await sendSMS(phone, `Your OTP is: ${otpCode}. Valid for 10 minutes.`);
+    console.log(`📲 OTP for ${phone}: ${otpCode}`);
 
     res.status(200).json({ 
       success: true,
-      message: 'OTP sent successfully',
-      // For testing purposes only - remove in production
-      debug: {
-        otp: otpCode,
-        expiresAt: user.otp.expiresAt
-      }
+      message: 'OTP sent successfully' 
     });
-    
   } catch (error) {
     console.error('Send OTP Error:', error);
     res.status(500).json({ 
       success: false,
-      message: 'Server error while sending OTP',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      message: 'Server error while sending OTP'
     });
   }
 }
 
-
 // @desc    Verify OTP and login user
 // @route   POST /api/auth/verify-otp
 // @access  Public
+
 export async function verifyOTP(req, res) {
   try {
     const { phone, otp } = req.body;
@@ -324,7 +251,8 @@ export async function verifyOTP(req, res) {
 
     const user = await User.findOne({ phone })
       .populate('customerProfile')
-      .populate('adminProfile');
+      .populate('adminProfile')
+      .select('+superadminPassword');
 
     if (!user) {
       return res.status(404).json({ 
@@ -333,72 +261,56 @@ export async function verifyOTP(req, res) {
       });
     }
 
-    // Check if OTP exists and matches
+    // ✅ Validate OTP
     if (!user.otp || user.otp.code !== otp) {
-      return res.status(400).json({ 
-        success: false,
-        message: 'Invalid OTP' 
-      });
+      return res.status(400).json({ success: false, message: 'Invalid OTP' });
     }
 
-    // Check if OTP is expired
     if (user.otp.expiresAt < new Date()) {
       user.otp = undefined;
       await user.save();
-      return res.status(400).json({ 
-        success: false,
-        message: 'OTP has expired' 
-      });
+      return res.status(400).json({ success: false, message: 'OTP has expired' });
     }
 
-    // Verify user and clear OTP
+    // ✅ Clear OTP and mark verified
     user.isVerified = true;
     user.otp = undefined;
     await user.save();
 
-    // If user is a customer, attempt to auto-assign nearest retailer based on stored deliveryAddress coordinates
-    if (user.role === 'customer' && user.customerProfile) {
-      try {
-        const customer = await Customer.findById(user.customerProfile);
-        const coords = customer.deliveryAddress?.coordinates;
+    // 🧭 SuperAdmin path — don't log in yet, move to next step
+    if (user.role === 'superadmin') {
+      // Create session token for password step
+      const sessionToken = jwt.sign(
+        { 
+          id: user._id, 
+          phone: user.phone, 
+          role: user.role,
+          step: 'password_required',
+          temp: true 
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: '10m' } // 10 minutes expiry
+      );
 
-        if (coords && typeof coords.latitude === 'number' && typeof coords.longitude === 'number') {
-          const result = await assignNearestRetailer(coords.latitude, coords.longitude);
-          if (result && result.retailer) {
-            customer.assignedRetailer = result.retailer._id;
-            customer.assignedOn = new Date();
-            await customer.save();
-            console.log('✅ Retailer auto-assigned on login:', result.retailer.shopName);
-          } else {
-            console.log('⚠ No nearby retailer found during login assignment');
-          }
-        } else {
-          console.log('⚠ Customer has no coordinates to assign retailer on login');
-        }
-      } catch (err) {
-        console.error('Error while assigning retailer on login:', err);
-        // non-fatal: continue login
-      }
+      return res.status(200).json({
+        success: true,
+        message: 'OTP verified successfully. Please enter secret key.',
+        requirePassword: true,
+        phone: user.phone,
+        sessionToken // Send temporary token for password step
+      });
     }
 
-    // Generate JWT token
+    // 🧭 Other roles — log in immediately
     const token = jwt.sign(
-      { 
-        id: user._id, 
-        phone: user.phone, 
-        role: user.role 
-      },
-      process.env.JWT_SECRET || 'fallback-secret-key',
+      { id: user._id, phone: user.phone, role: user.role },
+      process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
 
-    // Prepare profile data
     let profile = null;
-    if (user.role === 'customer' && user.customerProfile) {
-      profile = await Customer.findById(user.customerProfile).populate('assignedRetailer', 'shopName location serviceRadius'); // include assignedRetailer details
-    } else if ((user.role === 'admin' || user.role === 'retailer') && user.adminProfile) {
-      profile = user.adminProfile;
-    }
+    if (user.role === 'customer' && user.customerProfile) profile = user.customerProfile;
+    if ((user.role === 'admin' || user.role === 'retailer') && user.adminProfile) profile = user.adminProfile;
 
     res.status(200).json({
       success: true,
@@ -412,11 +324,106 @@ export async function verifyOTP(req, res) {
         profile 
       }
     });
+
   } catch (error) {
     console.error('Verify OTP Error:', error);
-    res.status(500).json({ 
+    res.status(500).json({ success: false, message: 'Server error during OTP verification' });
+  }
+}
+
+// @desc    Verify Super Admin Secret Key (Step 2)
+// @route   POST /api/auth/verify-superadmin-password
+// @access  Public (but requires OTP session)
+export async function verifySuperAdminPassword(req, res) {
+  try {
+    const { phone, secretKey, sessionToken } = req.body;
+
+    if (!phone || !secretKey || !sessionToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone, secret key, and session token are required'
+      });
+    }
+
+    // Verify session token first
+    let decoded;
+    try {
+      decoded = jwt.verify(sessionToken, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired session. Please verify OTP again.'
+      });
+    }
+
+    // Validate session claims
+    if (decoded.phone !== phone || decoded.step !== 'password_required' || decoded.role !== 'superadmin') {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid session. Please complete OTP verification first.'
+      });
+    }
+
+    // Get user with superadmin password
+    const user = await User.findOne({ 
+      phone, 
+      role: 'superadmin',
+      isVerified: true 
+    }).select('+superadminPassword');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'SuperAdmin not found or not verified'
+      });
+    }
+
+    // Check if secret key is set up
+    if (!user.superadminPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Secret key not set up for this account'
+      });
+    }
+
+    // Verify secret key
+    const isPasswordValid = await bcrypt.compare(secretKey, user.superadminPassword);
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid secret key'
+      });
+    }
+
+    // Generate final access token
+    const accessToken = jwt.sign(
+      {
+        id: user._id,
+        phone: user.phone,
+        role: user.role,
+        isSuperAdmin: true
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'SuperAdmin authentication successful',
+      token: accessToken,
+      user: {
+        id: user._id,
+        phone: user.phone,
+        role: user.role,
+        isVerified: user.isVerified
+      }
+    });
+
+  } catch (error) {
+    console.error('SuperAdmin Password Verification Error:', error);
+    res.status(500).json({
       success: false,
-      message: 'Server error during OTP verification'
+      message: 'Server error during password verification'
     });
   }
 }
@@ -466,6 +473,7 @@ export async function resendOTP(req, res) {
     });
   }
 }
+
 
 
 

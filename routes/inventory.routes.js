@@ -13,7 +13,10 @@ import {
   getInventoryAnalytics,
   getInventoryForCustomer,
   deleteInventoryItem,
-  forceDeleteInventoryItem
+  forceDeleteInventoryItem,
+  updatePricingSlabs,
+  calculatePriceForQuantity,
+  bulkCalculatePrices
 } from '../controllers/inventory.controller.js';
 
 const router = express.Router();
@@ -56,7 +59,14 @@ router.get('/alerts/low-stock', getLowStockAlerts);
 router.get('/logs', getInventoryLogs);
 router.get('/analytics', getInventoryAnalytics);
 
+/* ----------------------------------------------
+   PRICING SLABS MANAGEMENT
+------------------------------------------------*/
+router.put('/products/:inventoryId/pricing-slabs', updatePricingSlabs);
+router.post('/calculate-price', calculatePriceForQuantity);
+router.post('/bulk-calculate-prices', bulkCalculatePrices);
+
 router.delete('/products/:inventoryId', deleteInventoryItem);
 router.delete('/products/:inventoryId/force', forceDeleteInventoryItem); // Optional
 
-export default router;
+export default router;   //TEJAS

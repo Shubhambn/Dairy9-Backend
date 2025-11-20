@@ -68,18 +68,6 @@ router.post('/products/scan', scanBarcode); // Legacy pattern
 router.post('/scan-public', scanBarcode); // Enhanced pattern
 router.post('/scan-product', scanProductQR); // QR scanning
 
-// =============================================
-// PROTECTED ADMIN ROUTES
-// =============================================
-
-// Barcode status and management
-router.get('/barcode/status', auth, adminAuth, getProductsBarcodeStatus);
-router.get('/products/barcode/status', auth, adminAuth, getProductsBarcodeStatus); // Legacy pattern
-
-// Enhanced barcode scanning for product creation
-router.post('/scan-barcode', auth, adminAuth, scanBarcodeForProductData);
-router.post('/products/scan-barcode', auth, adminAuth, scanBarcodeForProductData); // Legacy pattern
-router.post('/scan-create', auth, adminAuth, createProductFromBarcode);
 
 // =============================================
 // PRODUCT MANAGEMENT ROUTES
@@ -146,9 +134,9 @@ router.delete('/:id/images/:imageId', auth, adminAuth, deleteProductImage);
 // QR CODE MANAGEMENT ROUTES
 // =============================================
 
-router.post("/generate/:id", generateProductQR);
-router.post("/products/generate/:id", generateProductQR); // Legacy pattern
-router.post("/:id/generate-qr", generateProductQR); // Enhanced pattern
+// router.post("/generate/:id", generateProductQR);
+// router.post("/products/generate/:id", generateProductQR); // Legacy pattern
+// router.post("/:id/generate-qr", generateProductQR); // Enhanced pattern
 
 // =============================================
 // BARCODE MANAGEMENT ROUTES

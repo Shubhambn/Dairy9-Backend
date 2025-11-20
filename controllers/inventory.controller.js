@@ -484,3 +484,328 @@ export const getInventoryForCustomer = asyncHandler(async (req, res) => {
     });
   }
 });
+
+
+
+// Add these controller methods to inventory.controller.js
+
+/**
+ * @desc    Update pricing slabs for inventory item
+ * @route   PUT /api/retailer/inventory/products/:inventoryId/pricing-slabs
+ * @access  Private (Retailer)
+ */
+export const updatePricingSlabs = [
+  // Validation middleware for pricing slabs
+  body('pricingSlabs')
+    .isArray()
+    .withMessage('Pricing slabs must be an array'),
+  body('pricingSlabs.*.minQuantity')
+    .isInt({ min: 0 })
+    .withMessage('Minimum quantity must be a non-negative integer'),
+  body('pricingSlabs.*.maxQuantity')
+    .isInt({ min: 1 })
+    .withMessage('Maximum quantity must be a positive integer'),
+  body('pricingSlabs.*.discountType')
+    .isIn(['FLAT', 'PERCENTAGE'])
+    .withMessage('Discount type must be FLAT or PERCENTAGE'),
+  body('pricingSlabs.*.discountValue')
+    .isFloat({ min: 0 })
+    .withMessage('Discount value must be a non-negative number'),
+
+  asyncHandler(async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed',
+          errors: errors.array()
+        });
+      }
+
+      const { inventoryId } = req.params;
+      const { pricingSlabs } = req.body;
+      const retailer = await getRetailerFromUser(req.user._id);
+
+      const inventoryItem = await InventoryService.updatePricingSlabs(
+        inventoryId,
+        retailer._id,
+        pricingSlabs,
+        req.user._id
+      );
+
+      res.json({
+        success: true,
+        message: 'Pricing slabs updated successfully',
+        data: inventoryItem
+      });
+
+    } catch (error) {
+      console.error('Update pricing slabs error:', error);
+      const statusCode = error.message.includes('not found') ? 404 : 400;
+      res.status(statusCode).json({
+        success: false,
+        message: error.message
+      });
+    }
+  })
+];
+
+/**
+ * @desc    Calculate price for specific quantity
+ * @route   POST /api/retailer/inventory/calculate-price
+ * @access  Private (Retailer)
+ */
+export const calculatePriceForQuantity = [
+  body('productId')
+    .isMongoId()
+    .withMessage('Valid product ID is required'),
+  body('quantity')
+    .isInt({ min: 1 })
+    .withMessage('Quantity must be a positive integer'),
+
+  asyncHandler(async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed',
+          errors: errors.array()
+        });
+      }
+
+      const { productId, quantity } = req.body;
+      const retailer = await getRetailerFromUser(req.user._id);
+
+      const priceInfo = await InventoryService.calculatePriceForQuantity(
+        retailer._id,
+        productId,
+        quantity
+      );
+
+      res.json({
+        success: true,
+        data: priceInfo
+      });
+
+    } catch (error) {
+      console.error('Calculate price error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message
+      });
+    }
+  })
+];
+
+/**
+ * @desc    Bulk calculate prices for multiple products
+ * @route   POST /api/retailer/inventory/bulk-calculate-prices
+ * @access  Private (Retailer)
+ */
+export const bulkCalculatePrices = [
+  body('items')
+    .isArray({ min: 1 })
+    .withMessage('Items array is required'),
+  body('items.*.productId')
+    .isMongoId()
+    .withMessage('Valid product ID is required'),
+  body('items.*.quantity')
+    .isInt({ min: 1 })
+    .withMessage('Quantity must be a positive integer'),
+
+  asyncHandler(async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed',
+          errors: errors.array()
+        });
+      }
+
+      const { items } = req.body;
+      const retailer = await getRetailerFromUser(req.user._id);
+
+      const result = await InventoryService.bulkCalculatePrices(
+        retailer._id,
+        items
+      );
+
+      res.json({
+        success: true,
+        data: result
+      });
+
+    } catch (error) {
+      console.error('Bulk calculate prices error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message
+      });
+    }
+  })
+];
+
+
+
+
+
+/**
+ * @desc    Get inventory dashboard with revenue metrics
+ * @route   GET /api/retailer/inventory/dashboard
+ * @access  Private (Retailer)
+ */
+export const getInventoryDashboard = asyncHandler(async (req, res) => {
+  try {
+    const retailer = await getRetailerFromUser(req.user._id);
+    const { timeFilter = 'all' } = req.query;
+
+    // Get revenue metrics from ORDERS (most accurate)
+    const revenueMetrics = await RevenueCalculationService.calculateRevenueMetrics(
+      retailer._id, 
+      timeFilter
+    );
+
+    // Get inventory summary
+    const inventorySummary = await RetailerInventory.aggregate([
+      {
+        $match: {
+          retailer: retailer._id,
+          isActive: true
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalProducts: { $sum: 1 },
+          totalStockValue: { 
+            $sum: { 
+              $multiply: ['$currentStock', '$sellingPrice'] 
+            } 
+          },
+          lowStockCount: {
+            $sum: {
+              $cond: [
+                { $lte: ['$currentStock', '$minStockLevel'] },
+                1,
+                0
+              ]
+            }
+          },
+          outOfStockCount: {
+            $sum: {
+              $cond: [
+                { $lte: ['$currentStock', 0] },
+                1,
+                0
+              ]
+            }
+          },
+          totalCurrentStock: { $sum: '$currentStock' },
+          totalCommittedStock: { $sum: '$committedStock' }
+        }
+      }
+    ]);
+
+    const summary = inventorySummary[0] || {
+      totalProducts: 0,
+      totalStockValue: 0,
+      lowStockCount: 0,
+      outOfStockCount: 0,
+      totalCurrentStock: 0,
+      totalCommittedStock: 0
+    };
+
+    // Combine revenue and inventory data
+    const dashboardData = {
+      summary: {
+        totalProducts: summary.totalProducts,
+        totalInventoryValue: Math.round(summary.totalStockValue * 100) / 100,
+        totalSales: revenueMetrics.totalSales,
+        totalRevenue: revenueMetrics.totalRevenue,
+        lowStockCount: summary.lowStockCount,
+        outOfStockCount: summary.outOfStockCount,
+        totalItemsSold: revenueMetrics.totalItemsSold,
+        profitMargin: revenueMetrics.profitMargin,
+        averageOrderValue: revenueMetrics.averageOrderValue
+      },
+      revenueMetrics: {
+        ...revenueMetrics,
+        timePeriod: revenueMetrics.timePeriod
+      },
+      inventory: {
+        totalCurrentStock: summary.totalCurrentStock,
+        totalCommittedStock: summary.totalCommittedStock,
+        availableStock: summary.totalCurrentStock - summary.totalCommittedStock
+      },
+      timestamp: new Date()
+    };
+
+    res.json({
+      success: true,
+      data: dashboardData
+    });
+
+  } catch (error) {
+    console.error('Get inventory dashboard error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * @desc    Get revenue analytics with filters
+ * @route   GET /api/retailer/inventory/revenue-analytics
+ * @access  Private (Retailer)
+ */
+export const getRevenueAnalytics = asyncHandler(async (req, res) => {
+  try {
+    const retailer = await getRetailerFromUser(req.user._id);
+    const { 
+      timeFilter = 'month',
+      startDate,
+      endDate,
+      period = 'monthly'
+    } = req.query;
+
+    const filters = {
+      timeFilter,
+      startDate: startDate ? new Date(startDate) : undefined,
+      endDate: endDate ? new Date(endDate) : undefined,
+      period
+    };
+
+    // Get detailed revenue metrics
+    const revenueMetrics = await RevenueCalculationService.calculateRevenueMetrics(
+      retailer._id, 
+      timeFilter
+    );
+
+    // Get revenue trends
+    const revenueTrends = await RevenueCalculationService.getRevenueTrends(
+      retailer._id, 
+      period
+    );
+
+    res.json({
+      success: true,
+      data: {
+        overview: revenueMetrics,
+        trends: revenueTrends,
+        timePeriod: revenueMetrics.timePeriod
+      }
+    });
+
+  } catch (error) {
+    console.error('Get revenue analytics error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});                // TEJAS
