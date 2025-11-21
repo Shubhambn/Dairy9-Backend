@@ -1,19 +1,18 @@
-// controllers/order.controller.js
 import mongoose from 'mongoose';
 import Customer from '../models/customer.model.js';
 import Order from '../models/order.model.js';
 import Product from '../models/product.model.js';
 import Admin from '../models/admin.model.js';
+import RetailerInventory from '../models/retailerInventory.model.js';
 import { getClosestRetailer, validateCoordinates, calculateDistance } from '../utils/locationUtils.js';
 import inventoryService from '../services/inventory.service.js';
-import RetailerInventory from '../models/retailerInventory.model.js';
 
 // Generate unique order ID
 const generateOrderId = () => {
   return 'ORD' + Date.now() + Math.floor(Math.random() * 1000);
 };
 
-// Helper function to find order by ID (supports both orderId string and MongoDB _id)
+// Helper function to find order by ID
 const findOrderById = async (orderIdentifier) => {
   if (!orderIdentifier) return null;
   if (typeof orderIdentifier === 'string' && orderIdentifier.startsWith('ORD')) {
@@ -23,32 +22,101 @@ const findOrderById = async (orderIdentifier) => {
   }
 };
 
+// Enhanced pricing calculation for order items
+const calculateOrderItemPricing = (product, inventoryItem, quantity) => {
+  const basePrice = inventoryItem?.sellingPrice || product.price || 0;
+  let currentPrice = basePrice;
+  let hasDiscount = false;
+  let discountPercentage = 0;
+  let savings = 0;
+  let currentAppliedSlab = null;
+  let isExtendedRange = false;
+
+  // Get active pricing slabs
+  if (inventoryItem?.enableQuantityPricing && inventoryItem.pricingSlabs) {
+    const activeSlabs = inventoryItem.pricingSlabs
+      .filter(slab => slab.isActive)
+      .sort((a, b) => a.minQuantity - b.minQuantity);
+
+    if (activeSlabs.length > 0) {
+      // Find applicable slab - with extended range logic
+      let applicableSlab = activeSlabs.find(slab => 
+        quantity >= slab.minQuantity && quantity <= slab.maxQuantity
+      );
+
+      // EXTENDED RANGE LOGIC: Use last slab if quantity exceeds all ranges
+      if (!applicableSlab && quantity > 0) {
+        applicableSlab = activeSlabs[activeSlabs.length - 1];
+        isExtendedRange = quantity >= applicableSlab.minQuantity;
+        
+        // Only apply extended range if quantity meets the last slab's minimum
+        if (!isExtendedRange) {
+          applicableSlab = null;
+        }
+      }
+
+      if (applicableSlab) {
+        currentAppliedSlab = applicableSlab;
+        
+        // Calculate discounted price
+        if (applicableSlab.discountType === 'FLAT') {
+          currentPrice = Math.max(0, basePrice - applicableSlab.discountValue);
+        } else if (applicableSlab.discountType === 'PERCENTAGE') {
+          const discountAmount = (basePrice * applicableSlab.discountValue) / 100;
+          currentPrice = Math.max(0, basePrice - discountAmount);
+        }
+        
+        hasDiscount = currentPrice < basePrice;
+        discountPercentage = applicableSlab.discountType === 'PERCENTAGE' 
+          ? applicableSlab.discountValue 
+          : Math.round(((basePrice - currentPrice) / basePrice) * 100);
+        savings = (basePrice - currentPrice) * quantity;
+      }
+    }
+  }
+
+  return {
+    basePrice: Math.round(basePrice * 100) / 100,
+    currentPrice: Math.round(currentPrice * 100) / 100,
+    hasDiscount,
+    discountPercentage: Math.round(discountPercentage * 100) / 100,
+    savings: Math.round(savings * 100) / 100,
+    currentAppliedSlab,
+    totalQuantity: quantity,
+    isExtendedRange,
+    itemTotal: Math.round(currentPrice * quantity * 100) / 100,
+    baseTotal: Math.round(basePrice * quantity * 100) / 100
+  };
+};
+
 // Helper function to get retailer's inventory prices
-// Helper function to get retailer's inventory prices - FIXED VERSION
-const getRetailerInventoryPrices = async (retailerId, authToken) => {
+const getRetailerInventoryPrices = async (retailerId) => {
   try {
     console.log(`💰 Fetching inventory for retailer: ${retailerId}`);
     
-    // Direct database query instead of API call to avoid issues
     const inventoryItems = await RetailerInventory.find({
       retailer: retailerId,
       isActive: true
     })
-    .populate('product', 'name sku price')
+    .populate('product', 'name sku price unit')
     .lean();
 
     console.log(`📦 Retrieved ${inventoryItems.length} inventory items directly from DB`);
     
-    // Format the response to match what the order creation expects
     const formattedInventory = inventoryItems.map(item => ({
       _id: item._id,
       product: {
         _id: item.product?._id,
-        name: item.product?.name
+        name: item.product?.name,
+        sku: item.product?.sku,
+        price: item.product?.price,
+        unit: item.product?.unit
       },
       sellingPrice: item.sellingPrice,
       currentStock: item.currentStock,
-      committedStock: item.committedStock
+      committedStock: item.committedStock,
+      enableQuantityPricing: item.enableQuantityPricing,
+      pricingSlabs: item.pricingSlabs || []
     }));
 
     return formattedInventory;
@@ -58,13 +126,7 @@ const getRetailerInventoryPrices = async (retailerId, authToken) => {
   }
 };
 
-// @desc    Create new order WITH INVENTORY RESERVATION AND PRICE OVERRIDES
-// @route   POST /api/orders
-// @access  Private
-// @desc    Create new order WITH INVENTORY RESERVATION AND PRICE OVERRIDES
-// @route   POST /api/orders
-// @access  Private
-// @desc    Create new order WITH INVENTORY RESERVATION AND PRICE OVERRIDES
+// @desc    Create new order WITH COMPLETE DISCOUNT CALCULATION
 // @route   POST /api/orders
 // @access  Private
 export const createOrder = async (req, res) => {
@@ -92,18 +154,17 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    // Find the closest retailer for order assignment FIRST
+    // Find the closest retailer for order assignment
     let assignedRetailer = null;
     let assignmentDetails = null;
     
-    // Use provided delivery address or customer's default address
     const addressToUse = deliveryAddress || customer.deliveryAddress;
     
     if (!addressToUse) {
       await session.abortTransaction();
       return res.status(400).json({
         success: false,
-        message: 'Delivery address is required. Please add a delivery address to your profile or provide one during checkout.'
+        message: 'Delivery address is required.'
       });
     }
 
@@ -111,11 +172,9 @@ export const createOrder = async (req, res) => {
     
     if (!customerLocation || !customerLocation.latitude || !customerLocation.longitude) {
       await session.abortTransaction();
-      console.log('Coordinates missing in delivery address');
       return res.status(400).json({
         success: false,
-        message: 'Delivery address coordinates are required. Please provide a valid address with location coordinates to place an order.',
-        suggestion: 'Please update your delivery address with proper location coordinates or select your location on the map.'
+        message: 'Delivery address coordinates are required.'
       });
     }
 
@@ -144,7 +203,7 @@ export const createOrder = async (req, res) => {
       customerLocation.latitude,
       customerLocation.longitude,
       retailers,
-      100 // 100km max radius
+      100
     );
     
     if (closestRetailerInfo && closestRetailerInfo.retailer) {
@@ -159,26 +218,21 @@ export const createOrder = async (req, res) => {
       console.log(`📍 Order assigned to retailer: ${closestRetailerInfo.retailer.shopName} (${closestRetailerInfo.distance}km away)`);
     } else {
       await session.abortTransaction();
-      console.log('❌ No retailer found within service radius');
       return res.status(400).json({
         success: false,
-        message: 'No retailer available within your delivery area. Please try a different address or contact customer support.',
-        suggestion: 'No active retailer found within the service radius for your delivery location.'
+        message: 'No retailer available within your delivery area.'
       });
     }
 
-    // 🔥 CRITICAL FIX: Get retailer's inventory prices BEFORE processing items
+    // Get retailer's inventory prices
     console.log('💰 Fetching retailer inventory prices for order...');
-    const inventoryItems = await getRetailerInventoryPrices(assignedRetailer, req.headers.authorization);
+    const inventoryItems = await getRetailerInventoryPrices(assignedRetailer);
     console.log(`📦 Retrieved ${inventoryItems.length} inventory items for retailer`);
 
-    // Debug: Log inventory items to see what we got
-    inventoryItems.forEach(item => {
-      console.log(`🔍 Inventory Item: ${item.product?.name} - Price: ${item.sellingPrice} - Product ID: ${item.product?._id}`);
-    });
-
-    // Process order items with retailer's overridden prices
+    // Process order items with COMPLETE DISCOUNT CALCULATION
     let totalAmount = 0;
+    let totalBaseAmount = 0;
+    let totalDiscount = 0;
     const orderItems = [];
 
     for (const item of items) {
@@ -199,47 +253,61 @@ export const createOrder = async (req, res) => {
         });
       }
 
-      // 🔥 USE RETAILER'S OVERRIDDEN PRICE - FIXED LOGIC
-      let finalPrice = product.price; // Default to catalog price
-      let isPriceOverridden = false;
-      
-      // Find this product in retailer's inventory - FIXED COMPARISON
+      // Find this product in retailer's inventory
       const inventoryItem = inventoryItems.find(inv => {
-        // Handle both populated and non-populated product references
         const inventoryProductId = inv.product?._id ? inv.product._id.toString() : inv.product?.toString();
         const itemProductId = item.productId.toString();
-        
         return inventoryProductId === itemProductId;
       });
 
+      // Calculate pricing with discounts
+      const pricing = calculateOrderItemPricing(product, inventoryItem, item.quantity);
+
+      let finalPrice = pricing.currentPrice;
+      let isPriceOverridden = false;
+      
       if (inventoryItem && inventoryItem.sellingPrice > 0) {
-        finalPrice = inventoryItem.sellingPrice;
+        finalPrice = pricing.currentPrice; // Use discounted price
         isPriceOverridden = finalPrice !== product.price;
-        console.log(`💰 Price override for ${product.name}: Catalog ₹${product.price} → Retailer ₹${finalPrice} (Overridden: ${isPriceOverridden})`);
+        console.log(`💰 Price for ${product.name}: Base ₹${product.price} → Final ₹${finalPrice} (Discount: ₹${pricing.savings})`);
       } else {
-        console.log(`💰 Using catalog price for ${product.name}: ₹${finalPrice} (No override found)`);
+        console.log(`💰 Using catalog price for ${product.name}: ₹${finalPrice}`);
       }
 
-      const itemTotal = finalPrice * item.quantity;
+      const itemTotal = pricing.itemTotal;
       totalAmount += itemTotal;
+      totalBaseAmount += pricing.baseTotal;
+      totalDiscount += pricing.savings;
 
       orderItems.push({
         product: product._id,
         quantity: item.quantity,
-        price: finalPrice, // 🔥 Use overridden price
-        originalPrice: product.price, // Store original catalog price
-        isPriceOverridden: isPriceOverridden, // Track override
+        price: finalPrice,
+        originalPrice: product.price,
+        isPriceOverridden: isPriceOverridden,
         priceSource: isPriceOverridden ? 'retailer_inventory' : 'catalog',
         unit: product.unit,
         reservedQuantity: 0,
-        isReserved: false
+        isReserved: false,
+        // DISCOUNT DETAILS - Store complete pricing information
+        discountDetails: {
+          basePrice: pricing.basePrice,
+          currentPrice: pricing.currentPrice,
+          hasDiscount: pricing.hasDiscount,
+          discountPercentage: pricing.discountPercentage,
+          savings: pricing.savings,
+          itemTotal: pricing.itemTotal,
+          baseTotal: pricing.baseTotal,
+          isExtendedRange: pricing.isExtendedRange,
+          appliedSlab: pricing.currentAppliedSlab
+        }
       });
     }
 
-    console.log(`🧮 Order total calculated: ₹${totalAmount}`);
+    console.log(`🧮 Order totals - Base: ₹${totalBaseAmount}, Discount: ₹${totalDiscount}, Final: ₹${totalAmount}`);
     console.log(`📊 Price sources: ${orderItems.filter(item => item.isPriceOverridden).length} overridden, ${orderItems.filter(item => !item.isPriceOverridden).length} catalog`);
 
-    // 👇 CHECK RETAILER INVENTORY AVAILABILITY
+    // Check retailer inventory availability
     const stockCheck = await inventoryService.checkStockAvailability(assignedRetailer, items);
     if (!stockCheck.allAvailable) {
       await session.abortTransaction();
@@ -251,13 +319,14 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    // Create order
+    // Create order with discount summary
     const order = new Order({
       orderId: generateOrderId(),
       customer: customer._id,
       items: orderItems,
-      totalAmount,
-      finalAmount: totalAmount,
+      totalAmount: totalBaseAmount, // Total before discounts
+      finalAmount: totalAmount, // Total after discounts
+      discount: totalDiscount, // Total discount amount
       deliveryAddress: addressToUse,
       deliveryTime: deliveryTime || customer.preferences?.deliveryTime,
       paymentMethod: paymentMethod || 'cash',
@@ -267,12 +336,21 @@ export const createOrder = async (req, res) => {
       assignmentDetails,
       reservationStatus: 'not_reserved',
       orderStatus: 'pending',
-      priceSource: orderItems.some(item => item.isPriceOverridden) ? 'retailer_inventory' : 'catalog'
+      priceSource: orderItems.some(item => item.isPriceOverridden) ? 'retailer_inventory' : 'catalog',
+      // DISCOUNT SUMMARY - Store overall discount information
+      discountSummary: {
+        totalDiscount: totalDiscount,
+        totalBaseAmount: totalBaseAmount,
+        finalAmount: totalAmount,
+        savingsPercentage: totalBaseAmount > 0 ? Math.round((totalDiscount / totalBaseAmount) * 100 * 100) / 100 : 0,
+        itemsWithDiscount: orderItems.filter(item => item.discountDetails.hasDiscount).length,
+        totalItems: orderItems.length
+      }
     });
 
     await order.save({ session });
 
-    // 👇 RESERVE STOCK IN RETAILER INVENTORY
+    // Reserve stock in retailer inventory
     try {
       const reservationResult = await inventoryService.reserveStockForOrder(
         order._id,
@@ -298,10 +376,10 @@ export const createOrder = async (req, res) => {
       await order.populate('items.product', 'name image unit');
       await order.populate('assignedRetailer', 'shopName fullName contactNumber');
 
-      console.log(`✅ Online order created successfully with price overrides`);
+      console.log(`✅ Online order created successfully with discounts`);
       console.log(`💰 Final order breakdown:`);
       order.items.forEach(item => {
-        console.log(`   ${item.product.name}: ${item.quantity} × ₹${item.price} = ₹${item.quantity * item.price} (${item.priceSource})`);
+        console.log(`   ${item.product.name}: ${item.quantity} × ₹${item.price} = ₹${item.quantity * item.price} (Saved: ₹${item.discountDetails.savings})`);
       });
 
       res.status(201).json({
@@ -312,6 +390,7 @@ export const createOrder = async (req, res) => {
           orderId: order.orderId,
           totalAmount: order.totalAmount,
           finalAmount: order.finalAmount,
+          discount: order.discount,
           orderStatus: order.orderStatus,
           reservationStatus: order.reservationStatus,
           assignedRetailer: order.assignedRetailer,
@@ -328,9 +407,12 @@ export const createOrder = async (req, res) => {
             isPriceOverridden: item.isPriceOverridden,
             priceSource: item.priceSource,
             unit: item.unit,
-            itemTotal: item.quantity * item.price
+            itemTotal: item.quantity * item.price,
+            // Include discount details in response
+            discountDetails: item.discountDetails
           })),
-          priceSource: order.priceSource
+          priceSource: order.priceSource,
+          discountSummary: order.discountSummary
         },
         reservationDetails: {
           reservedItems: reservationResult.reservedItems.length,
@@ -339,7 +421,6 @@ export const createOrder = async (req, res) => {
       });
 
     } catch (reservationError) {
-      // If reservation fails, delete the order
       await Order.findByIdAndDelete(order._id).session(session);
       await session.abortTransaction();
       
@@ -347,8 +428,7 @@ export const createOrder = async (req, res) => {
       
       res.status(400).json({
         success: false,
-        message: 'Order creation failed: Could not reserve stock. ' + reservationError.message,
-        suggestion: 'Please try again or contact customer support.'
+        message: 'Order creation failed: Could not reserve stock. ' + reservationError.message
       });
     }
 
@@ -365,7 +445,8 @@ export const createOrder = async (req, res) => {
   }
 };
 
-// @desc    Create offline order (from QR scanning) WITH PRICE OVERRIDES
+// In your order controller - Enhanced offline order creation
+// @desc    Create offline order WITH COMPLETE DISCOUNT CALCULATION
 // @route   POST /api/orders/offline
 // @access  Private/Retailer
 export const createOfflineOrder = async (req, res) => {
@@ -396,19 +477,15 @@ export const createOfflineOrder = async (req, res) => {
       });
     }
 
-    // 🔥 CRITICAL FIX: Get retailer's inventory to use overridden prices
+    // Get retailer's inventory
     console.log('💰 Fetching retailer inventory for offline order...');
-    const inventoryItems = await getRetailerInventoryPrices(retailer._id, req.headers.authorization);
+    const inventoryItems = await getRetailerInventoryPrices(retailer._id);
     console.log(`📦 Retrieved ${inventoryItems.length} inventory items for offline order`);
 
-    // Debug: Log inventory items to see what we got
-    inventoryItems.forEach(item => {
-      console.log(`🔍 Inventory Item: ${item.product?.name} - Price: ${item.sellingPrice} - Product ID: ${item.product?._id}`);
-    });
-
-    // Validate items and calculate total with OVERRIDDEN PRICES
+    // Validate items and calculate total with DISCOUNT CALCULATION
     let calculatedTotal = 0;
     let calculatedSubtotal = 0;
+    let calculatedDiscount = 0;
     const orderItems = [];
 
     for (const item of items) {
@@ -429,62 +506,76 @@ export const createOfflineOrder = async (req, res) => {
         });
       }
 
-      // 🔥 CRITICAL FIX: Find retailer's overridden price - FIXED LOGIC
-      let finalPrice = product.price; // Default to catalog price
-      let isPriceOverridden = false;
-
-      // Find this product in retailer's inventory - FIXED COMPARISON
+      // Find this product in retailer's inventory
       const inventoryItem = inventoryItems.find(inv => {
-        // Handle both populated and non-populated product references
         const inventoryProductId = inv.product?._id ? inv.product._id.toString() : inv.product?.toString();
         const itemProductId = item.productId.toString();
-        
         return inventoryProductId === itemProductId;
       });
 
+      // Calculate pricing with discounts - USING THE SAME LOGIC
+      const pricing = calculateOrderItemPricing(product, inventoryItem, item.quantity);
+
+      let finalPrice = pricing.currentPrice;
+      let isPriceOverridden = false;
+
       if (inventoryItem && inventoryItem.sellingPrice > 0) {
-        finalPrice = inventoryItem.sellingPrice;
+        finalPrice = pricing.currentPrice;
         isPriceOverridden = finalPrice !== product.price;
-        console.log(`💰 Price override for ${product.name}: Catalog ₹${product.price} → Retailer ₹${finalPrice} (Overridden: ${isPriceOverridden})`);
+        console.log(`💰 Price for ${product.name}: Base ₹${product.price} → Final ₹${finalPrice} (Discount: ₹${pricing.savings})`);
       } else {
-        console.log(`💰 Using catalog price for ${product.name}: ₹${finalPrice} (No override found)`);
+        console.log(`💰 Using catalog price for ${product.name}: ₹${finalPrice}`);
       }
 
-      const itemTotal = finalPrice * item.quantity;
+      const itemTotal = pricing.itemTotal;
       calculatedTotal += itemTotal;
-      calculatedSubtotal += itemTotal;
+      calculatedSubtotal += pricing.baseTotal;
+      calculatedDiscount += pricing.savings;
 
       orderItems.push({
         product: product._id,
         quantity: item.quantity,
-        price: finalPrice, // 🔥 Use overridden price
-        originalPrice: product.price, // Store original catalog price
-        isPriceOverridden: isPriceOverridden, // Track if price was overridden
+        price: finalPrice,
+        originalPrice: product.price,
+        isPriceOverridden: isPriceOverridden,
         priceSource: isPriceOverridden ? 'retailer_inventory' : 'catalog',
         unit: product.unit,
         reservedQuantity: 0,
         isReserved: false,
-        productName: product.name, // Store product name for offline reference
-        barcodeId: item.barcodeId, // Store barcode info
-        scannedBarcodeId: item.scannedBarcodeId
+        productName: product.name,
+        barcodeId: item.barcodeId,
+        scannedBarcodeId: item.scannedBarcodeId,
+        // COMPLETE DISCOUNT DETAILS - SAME AS ONLINE ORDERS
+        discountDetails: {
+          basePrice: pricing.basePrice,
+          currentPrice: pricing.currentPrice,
+          hasDiscount: pricing.hasDiscount,
+          discountPercentage: pricing.discountPercentage,
+          savings: pricing.savings,
+          itemTotal: pricing.itemTotal,
+          baseTotal: pricing.baseTotal,
+          isExtendedRange: pricing.isExtendedRange,
+          appliedSlab: pricing.currentAppliedSlab,
+          singlePieceDiscount: pricing.singlePieceDiscount
+        }
       });
     }
 
     // Use provided totals or calculate our own
     const finalTotal = total || calculatedTotal;
     const finalSubtotal = subtotal || calculatedSubtotal;
-    const finalDiscount = discount || 0;
+    const finalDiscount = discount || calculatedDiscount;
 
     console.log('🧮 Offline order totals:', {
       calculatedTotal,
       calculatedSubtotal,
+      calculatedDiscount,
       providedTotal: total,
       providedSubtotal: subtotal,
       finalTotal,
       finalSubtotal,
       finalDiscount
     });
-    console.log(`📊 Price sources: ${orderItems.filter(item => item.isPriceOverridden).length} overridden, ${orderItems.filter(item => !item.isPriceOverridden).length} catalog`);
 
     // Check retailer inventory availability
     const stockCheck = await inventoryService.checkStockAvailability(retailer._id, items);
@@ -497,7 +588,7 @@ export const createOfflineOrder = async (req, res) => {
       });
     }
 
-    // Create offline order
+    // Create offline order with discount summary
     const order = new Order({
       orderId: generateOrderId(),
       items: orderItems,
@@ -505,7 +596,7 @@ export const createOfflineOrder = async (req, res) => {
       finalAmount: finalTotal,
       discount: finalDiscount,
       paymentMethod: paymentMethod || 'cash',
-      paymentStatus: 'paid', // Offline orders are paid immediately
+      paymentStatus: 'paid',
       specialInstructions,
       orderType: 'offline',
       processedBy: retailer._id,
@@ -518,11 +609,21 @@ export const createOfflineOrder = async (req, res) => {
         serviceRadius: retailer.serviceRadius
       },
       reservationStatus: 'not_reserved',
-      orderStatus: 'delivered', // Offline orders are completed immediately
+      orderStatus: 'delivered',
       deliveryDate: new Date(),
       customerName,
       customerPhone,
       priceSource: orderItems.some(item => item.isPriceOverridden) ? 'retailer_inventory' : 'catalog',
+      // COMPLETE DISCOUNT SUMMARY
+      discountSummary: {
+        totalDiscount: finalDiscount,
+        totalBaseAmount: finalSubtotal,
+        finalAmount: finalTotal,
+        savingsPercentage: finalSubtotal > 0 ? Math.round((finalDiscount / finalSubtotal) * 100 * 100) / 100 : 0,
+        itemsWithDiscount: orderItems.filter(item => item.discountDetails.hasDiscount).length,
+        totalItems: orderItems.length,
+        extendedRangeItems: orderItems.filter(item => item.discountDetails.isExtendedRange).length
+      },
       createdAt: new Date(),
       updatedAt: new Date()
     });
@@ -569,10 +670,10 @@ export const createOfflineOrder = async (req, res) => {
       // Populate order for response
       await order.populate('items.product', 'name image unit');
 
-      console.log('✅ Offline order created successfully with overridden prices');
+      console.log('✅ Offline order created successfully with discounts');
       console.log(`💰 Final offline order breakdown:`);
       order.items.forEach(item => {
-        console.log(`   ${item.product.name}: ${item.quantity} × ₹${item.price} = ₹${item.quantity * item.price} (${item.priceSource})`);
+        console.log(`   ${item.product.name}: ${item.quantity} × ₹${item.price} = ₹${item.quantity * item.price} (Saved: ₹${item.discountDetails.savings})`);
       });
 
       res.status(201).json({
@@ -601,7 +702,9 @@ export const createOfflineOrder = async (req, res) => {
             priceSource: item.priceSource,
             unit: item.unit,
             productName: item.productName,
-            itemTotal: item.quantity * item.price
+            itemTotal: item.quantity * item.price,
+            // Include complete discount details
+            discountDetails: item.discountDetails
           })),
           customerName: order.customerName,
           customerPhone: order.customerPhone,
@@ -609,7 +712,8 @@ export const createOfflineOrder = async (req, res) => {
             retailerName: retailer.fullName,
             shopName: retailer.shopName
           },
-          priceSource: order.priceSource
+          priceSource: order.priceSource,
+          discountSummary: order.discountSummary
         },
         inventoryUpdate: {
           reserved: reservationResult.reservedItems.length,
@@ -642,7 +746,7 @@ export const createOfflineOrder = async (req, res) => {
   }
 };
 
-// @desc    Get customer orders
+// @desc    Get customer orders WITH DISCOUNT DETAILS
 // @route   GET /api/orders
 // @access  Private
 export const getCustomerOrders = async (req, res) => {
@@ -664,21 +768,33 @@ export const getCustomerOrders = async (req, res) => {
     }
 
     const orders = await Order.find(filter)
-      .populate('items.product', 'name image unit price') // Include price in population
+      .populate('items.product', 'name image unit price')
       .populate('assignedRetailer', 'shopName fullName contactNumber')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
 
-    // Process orders to ensure correct price display
+    // Process orders to include discount details
     const processedOrders = orders.map(order => ({
       ...order.toObject(),
       items: order.items.map(item => ({
         ...item.toObject(),
-        displayPrice: item.price, // Use stored order price
+        displayPrice: item.price,
         finalPrice: item.price,
         isPriceOverridden: item.isPriceOverridden || false,
-        originalPrice: item.originalPrice || item.product?.price || 0
+        originalPrice: item.originalPrice || item.product?.price || 0,
+        // Ensure discount details are included
+        discountDetails: item.discountDetails || {
+          basePrice: item.originalPrice || item.product?.price || 0,
+          currentPrice: item.price,
+          hasDiscount: false,
+          discountPercentage: 0,
+          savings: 0,
+          itemTotal: item.quantity * item.price,
+          baseTotal: (item.originalPrice || item.product?.price || 0) * item.quantity,
+          isExtendedRange: false,
+          appliedSlab: null
+        }
       }))
     }));
 
@@ -703,7 +819,7 @@ export const getCustomerOrders = async (req, res) => {
   }
 };
 
-// @desc    Get single order details
+// @desc    Get single order details WITH DISCOUNT DETAILS
 // @route   GET /api/orders/:id
 // @access  Private
 export const getOrderById = async (req, res) => {
@@ -711,7 +827,6 @@ export const getOrderById = async (req, res) => {
     const userId = req.user._id;
     const orderIdentifier = req.params.id;
 
-    // Use helper function to find order
     let order = await findOrderById(orderIdentifier);
 
     if (!order) {
@@ -744,9 +859,28 @@ export const getOrderById = async (req, res) => {
     await order.populate('customer', 'personalInfo.fullName');
     await order.populate('assignedRetailer', 'shopName fullName contactNumber address');
 
+    // Ensure discount details are properly formatted
+    const processedOrder = {
+      ...order.toObject(),
+      items: order.items.map(item => ({
+        ...item.toObject(),
+        discountDetails: item.discountDetails || {
+          basePrice: item.originalPrice || item.product?.price || 0,
+          currentPrice: item.price,
+          hasDiscount: false,
+          discountPercentage: 0,
+          savings: 0,
+          itemTotal: item.quantity * item.price,
+          baseTotal: (item.originalPrice || item.product?.price || 0) * item.quantity,
+          isExtendedRange: false,
+          appliedSlab: null
+        }
+      }))
+    };
+
     res.status(200).json({
       success: true,
-      order
+      order: processedOrder
     });
   } catch (error) {
     console.error('Get Order Error:', error);
@@ -757,6 +891,111 @@ export const getOrderById = async (req, res) => {
     });
   }
 };
+
+// @desc    Calculate order pricing with discounts (for cart preview)
+// @route   POST /api/orders/calculate-pricing
+// @access  Private
+export const calculateOrderPricing = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { items } = req.body;
+
+    const customer = await Customer.findOne({ user: userId });
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer profile not found'
+      });
+    }
+
+    // Find the closest retailer (similar to createOrder)
+    const addressToUse = customer.deliveryAddress;
+    if (!addressToUse?.coordinates) {
+      return res.status(400).json({
+        success: false,
+        message: 'Delivery address is required for pricing calculation'
+      });
+    }
+
+    const retailers = await Admin.find({ isActive: true });
+    const closestRetailerInfo = getClosestRetailer(
+      addressToUse.coordinates.latitude,
+      addressToUse.coordinates.longitude,
+      retailers,
+      100
+    );
+
+    if (!closestRetailerInfo) {
+      return res.status(400).json({
+        success: false,
+        message: 'No retailer available in your area'
+      });
+    }
+
+    const assignedRetailer = closestRetailerInfo.retailer._id;
+
+    // Get retailer inventory
+    const inventoryItems = await getRetailerInventoryPrices(assignedRetailer);
+
+    // Calculate pricing for each item
+    let totalBaseAmount = 0;
+    let totalFinalAmount = 0;
+    let totalDiscount = 0;
+    const pricedItems = [];
+
+    for (const item of items) {
+      const product = await Product.findById(item.productId);
+      if (!product) continue;
+
+      const inventoryItem = inventoryItems.find(inv => {
+        const inventoryProductId = inv.product?._id ? inv.product._id.toString() : inv.product?.toString();
+        return inventoryProductId === item.productId.toString();
+      });
+
+      const pricing = calculateOrderItemPricing(product, inventoryItem, item.quantity);
+
+      pricedItems.push({
+        productId: item.productId,
+        productName: product.name,
+        quantity: item.quantity,
+        unit: product.unit,
+        pricing: pricing
+      });
+
+      totalBaseAmount += pricing.baseTotal;
+      totalFinalAmount += pricing.itemTotal;
+      totalDiscount += pricing.savings;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        items: pricedItems,
+        summary: {
+          totalBaseAmount: Math.round(totalBaseAmount * 100) / 100,
+          totalFinalAmount: Math.round(totalFinalAmount * 100) / 100,
+          totalDiscount: Math.round(totalDiscount * 100) / 100,
+          savingsPercentage: totalBaseAmount > 0 ? Math.round((totalDiscount / totalBaseAmount) * 100 * 100) / 100 : 0,
+          retailer: {
+            name: closestRetailerInfo.retailer.shopName,
+            distance: closestRetailerInfo.distance
+          }
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Calculate pricing error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error calculating order pricing',
+      error: error.message
+    });
+  }
+};
+
+// The rest of your existing functions remain the same (cancelOrder, updateOrderStatus, etc.)
+// ... [Keep all your existing functions like cancelOrder, updateOrderStatus, getRetailerOrders, etc.]
 
 // @desc    Cancel order AND RELEASE RESERVED STOCK
 // @route   PUT /api/orders/:id/cancel
@@ -775,7 +1014,6 @@ export const cancelOrder = async (req, res) => {
       });
     }
 
-    // Use helper function to find order
     const order = await findOrderById(orderIdentifier);
 
     if (!order) {
@@ -785,7 +1023,6 @@ export const cancelOrder = async (req, res) => {
       });
     }
 
-    // Check if customer owns this order
     if (order.customer.toString() !== customer._id.toString()) {
       return res.status(403).json({
         success: false,
@@ -793,7 +1030,6 @@ export const cancelOrder = async (req, res) => {
       });
     }
 
-    // Only pending or confirmed orders can be cancelled
     if (!['pending', 'confirmed'].includes(order.orderStatus)) {
       return res.status(400).json({
         success: false,
@@ -801,7 +1037,6 @@ export const cancelOrder = async (req, res) => {
       });
     }
 
-    // 👇 RELEASE RESERVED STOCK if order was reserved
     let stockReleaseResult = null;
     if (order.reservationStatus === 'reserved') {
       stockReleaseResult = await inventoryService.cancelOrderReservation(
@@ -812,7 +1047,6 @@ export const cancelOrder = async (req, res) => {
       );
     }
 
-    // Update order status
     order.orderStatus = 'cancelled';
     order.reservationStatus = 'released';
     order.releaseDate = new Date();
@@ -859,18 +1093,15 @@ export const updateOrderStatus = async (req, res) => {
       });
     }
 
-    // Use helper function to find order
     const order = await findOrderById(orderIdentifier);
 
     if (!order) {
-      console.log('Order not found for identifier:', orderIdentifier);
       return res.status(404).json({
         success: false,
         message: 'Order not found'
       });
     }
 
-    // If user is retailer, check if order is assigned to them
     if (req.user.role === 'retailer') {
       const retailer = await Admin.findOne({ user: req.user._id });
       if (!retailer) {
@@ -888,9 +1119,6 @@ export const updateOrderStatus = async (req, res) => {
       }
     }
 
-    console.log('Found order:', order._id, 'current status:', order.orderStatus);
-
-    // 👇 HANDLE DELIVERY - DEDUCT RESERVED STOCK
     if (status === 'delivered' && order.orderStatus !== 'delivered') {
       if (order.reservationStatus === 'reserved') {
         try {
@@ -911,7 +1139,6 @@ export const updateOrderStatus = async (req, res) => {
       }
     }
 
-    // 👇 HANDLE CANCELLATION - RELEASE RESERVED STOCK
     if (status === 'cancelled' && order.orderStatus !== 'cancelled') {
       if (order.reservationStatus === 'reserved') {
         try {
@@ -925,21 +1152,18 @@ export const updateOrderStatus = async (req, res) => {
           order.reservationStatus = 'released';
         } catch (releaseError) {
           console.error('Failed to release stock on cancellation:', releaseError);
-          // Continue with cancellation even if stock release fails
         }
       }
     }
 
     order.orderStatus = status;
     
-    // If delivered, set delivered at timestamp
     if (status === 'delivered') {
       order.deliveredAt = new Date();
     }
 
     await order.save();
 
-    // Populate order for response
     await order.populate('items.product', 'name image unit');
     await order.populate('customer', 'personalInfo.fullName');
     await order.populate('assignedRetailer', 'shopName fullName contactNumber');
@@ -960,6 +1184,9 @@ export const updateOrderStatus = async (req, res) => {
     });
   }
 };
+
+// ... [Keep all other existing functions as they are]
+
 
 // @desc    Get retailer's assigned orders
 // @route   GET /api/orders/retailer/my-orders

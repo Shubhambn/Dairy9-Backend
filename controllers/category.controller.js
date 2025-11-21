@@ -214,27 +214,41 @@ export const deleteCategory = async (req, res) => {
       });
     }
 
+    // Check if there are any products associated with this category
+    const productsCount = await Product.countDocuments({ 
+      category: req.params.id,
+      isActive: true 
+    });
+
+    if (productsCount > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete category. There are ${productsCount} products associated with this category. Please reassign or delete those products first.`
+      });
+    }
+
     // Delete image from Cloudinary if exists
     if (category.imagePublicId) {
       try {
         await deleteFromCloudinary(category.imagePublicId);
       } catch (deleteError) {
         console.error('Error deleting image from Cloudinary:', deleteError);
+        // Continue with deletion even if image deletion fails
       }
     }
 
-    // Soft delete - set isActive to false
-    category.isActive = false;
-    await category.save();
+    // HARD DELETE - Completely remove from database
+    await Category.findByIdAndDelete(req.params.id);
 
     res.json({
       success: true,
-      message: 'Category deleted successfully'
+      message: 'Category permanently deleted successfully'
     });
   } catch (error) {
+    console.error('Delete category error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error',
+      message: 'Server error while deleting category',
       error: error.message
     });
   }

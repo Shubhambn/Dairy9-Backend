@@ -213,175 +213,42 @@ class InventoryService {
     /**
      * Update stock with transaction safety
      */
-    async updateStock(params) {
-        const session = await mongoose.startSession();
-        let inventoryItemBeforeSave = null;
-
-        try {
-            session.startTransaction();
-
-            const {
-                retailerId,
-                productId,
-                quantity,
-                transactionType,
-                reason,
-                referenceType,
-                referenceId,
-                batchNumber,
-                expiryDate,
-                unitCost,
-                notes,
-                userId,
-                ipAddress,
-                userAgent
-            } = params;
-
-            console.log('🔄 updateStock:', { transactionType, productId, quantity, reason });
-
-            // Find inventory item
-            const inventoryItem = await RetailerInventory.findOne({
-                retailer: retailerId,
-                product: productId
-            }).session(session);
-
-            if (!inventoryItem) {
-                throw new Error('Inventory item not found');
-            }
-
-            console.log('📦 Before update - Current:', inventoryItem.currentStock,
-                'Committed:', inventoryItem.committedStock,
-                'Total Sold:', inventoryItem.totalSold);
-
-            const previousStock = inventoryItem.currentStock;
-            const previousCommitted = inventoryItem.committedStock;
-            let newStock = previousStock;
-            let newCommitted = previousCommitted;
-
-            // Calculate new stock based on transaction type
-            switch (transactionType) {
-                case 'STOCK_IN':
-                    newStock = previousStock + Math.abs(quantity);
-                    console.log(`📈 STOCK_IN: ${previousStock} + ${quantity} = ${newStock}`);
-                    inventoryItem.lastRestocked = new Date();
-                    break;
-
-                case 'STOCK_OUT':
-                    newStock = previousStock - Math.abs(quantity);
-                    console.log(`📉 STOCK_OUT: ${previousStock} - ${quantity} = ${newStock}`);
-                    if (newStock < 0) {
-                        throw new Error('Insufficient stock');
-                    }
-
-                    // UPDATE SALES METRICS FOR ACTUAL SALES
-                    if (reason === 'SALE') {
-                        inventoryItem.totalSold += quantity;
-                        inventoryItem.lastSoldDate = new Date();
-                        console.log(`💰 Updated totalSold: +${quantity} = ${inventoryItem.totalSold}`);
-                    }
-                    break;
-
-                case 'STOCK_ADJUSTMENT':
-                    newStock = quantity;
-                    console.log(`⚙️ STOCK_ADJUSTMENT: ${previousStock} → ${newStock}`);
-                    if (newStock < 0) {
-                        throw new Error('Stock cannot be negative');
-                    }
-                    break;
-
-                case 'COMMITMENT':
-                    const availableStock = inventoryItem.currentStock - inventoryItem.committedStock;
-                    console.log(`🔒 COMMITMENT: Available ${availableStock}, Requested ${quantity}`);
-                    if (availableStock < quantity) {
-                        throw new Error('Insufficient available stock for commitment');
-                    }
-                    newCommitted = previousCommitted + quantity;
-                    console.log(`🔒 COMMITMENT: ${previousCommitted} + ${quantity} = ${newCommitted}`);
-                    break;
-
-                case 'RELEASE_COMMITMENT':
-                    console.log(`🔓 RELEASE_COMMITMENT: ${previousCommitted} - ${quantity}`);
-                    if (inventoryItem.committedStock < quantity) {
-                        throw new Error('Cannot release more than committed stock');
-                    }
-                    newCommitted = previousCommitted - quantity;
-                    break;
-
-                default:
-                    throw new Error('Invalid transaction type');
-            }
-
-            // Update inventory values
-            if (!['COMMITMENT', 'RELEASE_COMMITMENT'].includes(transactionType)) {
-                inventoryItem.currentStock = newStock;
-            } else {
-                inventoryItem.committedStock = newCommitted;
-            }
-
-            await inventoryItem.save({ session });
-
-            console.log('💾 Inventory saved - Current:', inventoryItem.currentStock,
-                'Committed:', inventoryItem.committedStock,
-                'Total Sold:', inventoryItem.totalSold);
-
-            // Store data for later use before session ends
-            inventoryItemBeforeSave = {
-                _id: inventoryItem._id,
-                currentStock: inventoryItem.currentStock,
-                committedStock: inventoryItem.committedStock,
-                product: inventoryItem.product
-            };
-
-            // Create inventory log
-            const inventoryLog = new InventoryLog({
-                retailer: retailerId,
-                product: productId,
-                inventoryItem: inventoryItem._id,
-                transactionType,
-                quantity: Math.abs(quantity),
-                previousStock,
-                newStock: ['COMMITMENT', 'RELEASE_COMMITMENT'].includes(transactionType) ? previousStock : newStock,
-                unitCost,
-                totalValue: unitCost ? unitCost * Math.abs(quantity) : 0,
-                referenceType,
-                referenceId,
-                batchNumber,
-                expiryDate,
-                reason,
-                notes,
-                createdBy: userId,
-                ipAddress,
-                userAgent
-            });
-
-            await inventoryLog.save({ session });
-            await session.commitTransaction();
-
-            console.log('✅ updateStock completed successfully');
-
-            // ✅ FIX: Session end karne ke baad hi database calls karo
-            const updatedInventoryItem = await RetailerInventory.findById(inventoryItemBeforeSave._id)
-                .populate('product', 'name sku unit unitSize image');
-
-            // Invalidate cache after successful update
-            await CacheService.invalidateInventoryCache(retailerId);
-
-            return {
-                success: true,
-                inventoryItem: updatedInventoryItem,
-                inventoryLog,
-                stockChange: newStock - previousStock
-            };
-
-        } catch (error) {
+// In inventory.service.js - Update session handling
+async updateStock(params) {
+    const session = await mongoose.startSession();
+    
+    try {
+        session.startTransaction();
+        
+        // ... your existing logic ...
+        
+        await session.commitTransaction();
+        console.log('✅ Transaction committed successfully');
+        
+        return result;
+        
+    } catch (error) {
+        console.error('❌ Transaction failed:', error);
+        
+        // ✅ BETTER ERROR HANDLING
+        if (session.inTransaction()) {
             await session.abortTransaction();
-            console.error('❌ updateStock failed:', error);
-            throw error;
-        } finally {
-            // ✅ FIX: Session ko end karo transaction complete hone ke baad
-            await session.endSession();
         }
+        
+        // ✅ SPECIFIC ERROR MESSAGES
+        if (error.message.includes('Insufficient stock')) {
+            throw new Error(`Insufficient stock: ${error.message}`);
+        }
+        if (error.message.includes('not found')) {
+            throw new Error(`Product not found in inventory`);
+        }
+        
+        throw new Error(`Stock update failed: ${error.message}`);
+    } finally {
+        // ✅ ENSURED SESSION CLEANUP
+        await session.endSession();
     }
+}
 
     /**
      * Add product to retailer inventory
@@ -1343,66 +1210,81 @@ class InventoryService {
         }
     }
 
-    /**
-     * Calculate price for a specific quantity
-     */
-    async calculatePriceForQuantity(retailerId, productId, quantity) {
-        try {
-            const inventoryItem = await RetailerInventory.findOne({
-                retailer: retailerId,
-                product: productId,
-                isActive: true
-            }).populate('product', 'name sku unit unitSize image');
 
-            if (!inventoryItem) {
-                throw new Error('Product not found in inventory');
-            }
+async calculatePriceForQuantity(retailerId, productId, quantity) {
+    try {
+        const inventoryItem = await RetailerInventory.findOne({
+            retailer: retailerId,
+            product: productId,
+            isActive: true
+        }).populate('product', 'name sku unit unitSize image');
 
-            const basePrice = inventoryItem.sellingPrice || 0;
-            let finalPrice = basePrice;
-            let appliedDiscount = 0;
-            let discountType = null;
-            let finalUnitPrice = basePrice;
-
-            if (inventoryItem.enableQuantityPricing && inventoryItem.pricingSlabs) {
-                const applicableSlab = inventoryItem.pricingSlabs
-                    .filter(slab => slab.isActive)
-                    .sort((a, b) => a.minQuantity - b.minQuantity)
-                    .find(slab => quantity >= slab.minQuantity && quantity <= slab.maxQuantity);
-
-                if (applicableSlab) {
-                    const totalPrice = basePrice * quantity;
-                    
-                    if (applicableSlab.discountType === 'FLAT') {
-                        appliedDiscount = applicableSlab.discountValue;
-                        finalPrice = Math.max(0, totalPrice - appliedDiscount);
-                        finalUnitPrice = finalPrice / quantity;
-                    } else if (applicableSlab.discountType === 'PERCENTAGE') {
-                        appliedDiscount = (totalPrice * applicableSlab.discountValue) / 100;
-                        finalPrice = Math.max(0, totalPrice - appliedDiscount);
-                        finalUnitPrice = finalPrice / quantity;
-                    }
-                    discountType = applicableSlab.discountType;
-                }
-            }
-
-            return {
-                productId,
-                productName: inventoryItem.productName,
-                quantity,
-                basePrice,
-                finalPrice: Math.round(finalPrice * 100) / 100,
-                finalUnitPrice: Math.round(finalUnitPrice * 100) / 100,
-                appliedDiscount: Math.round(appliedDiscount * 100) / 100,
-                discountType,
-                hasQuantityPricing: inventoryItem.enableQuantityPricing,
-                pricingSlabs: inventoryItem.enableQuantityPricing ? inventoryItem.pricingSlabs : []
-            };
-        } catch (error) {
-            console.error('Calculate price error:', error);
-            throw error;
+        if (!inventoryItem) {
+            throw new Error('Product not found in inventory');
         }
+
+        // ✅ Use the new per-piece calculation method
+        const priceInfo = inventoryItem.calculatePricePerPiece(quantity);
+
+        return {
+            productId,
+            productName: inventoryItem.productName,
+            ...priceInfo,
+            hasQuantityPricing: inventoryItem.enableQuantityPricing,
+            pricingSlabs: inventoryItem.enableQuantityPricing ? inventoryItem.pricingSlabs : []
+        };
+    } catch (error) {
+        console.error('Calculate price error:', error);
+        throw error;
     }
+}
+
+
+/**
+ * Calculate per-piece pricing for order items
+ */
+async calculateOrderPricing(retailerId, orderItems) {
+    try {
+        const pricedItems = [];
+
+        for (const item of orderItems) {
+            const priceInfo = await this.calculatePriceForQuantity(
+                retailerId,
+                item.productId,
+                item.quantity
+            );
+
+            pricedItems.push({
+                ...item,
+                pricing: priceInfo,
+                finalPrice: priceInfo.finalPrice,
+                unitPrice: priceInfo.finalUnitPrice
+            });
+        }
+
+        // Calculate order totals
+        const orderTotal = pricedItems.reduce((sum, item) => sum + item.finalPrice, 0);
+        const totalDiscount = pricedItems.reduce((sum, item) => sum + item.pricing.appliedDiscount, 0);
+        const baseTotal = pricedItems.reduce((sum, item) => sum + item.pricing.baseTotal, 0);
+
+        return {
+            items: pricedItems,
+            summary: {
+                baseTotal: Math.round(baseTotal * 100) / 100,
+                finalTotal: Math.round(orderTotal * 100) / 100,
+                totalDiscount: Math.round(totalDiscount * 100) / 100,
+                totalSavings: Math.round((baseTotal - orderTotal) * 100) / 100,
+                savingsPercentage: baseTotal > 0 ? 
+                    Math.round(((baseTotal - orderTotal) / baseTotal) * 100 * 100) / 100 : 0
+            }
+        };
+    } catch (error) {
+        console.error('Calculate order pricing error:', error);
+        throw error;
+    }
+}
+
+
 
     /**
      * Bulk calculate prices for multiple products

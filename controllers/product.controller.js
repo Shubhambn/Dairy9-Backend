@@ -66,6 +66,9 @@ const checkBarcodeUniqueness = async (barcode, excludeProductId = null) => {
 // @desc    Create new product (with QR + text overlay)
 // @route   POST /api/catalog/products
 // @access  Private (Admin)
+// @desc    Create new product (with QR + text overlay)
+// @route   POST /api/catalog/products
+// @access  Private (Admin)
 export const createProduct = async (req, res) => {
   // 0️⃣ Test Cloudinary connection
   const cloudinaryConnected = await testCloudinaryConnection();
@@ -83,6 +86,20 @@ export const createProduct = async (req, res) => {
       scannedBarcodeId,
       cloudinaryImages
     } = req.body;
+
+    // 🎯 FIX: Parse cloudinaryImages if it's a JSON string from frontend
+    let parsedCloudinaryImages = [];
+    if (cloudinaryImages) {
+      try {
+        parsedCloudinaryImages = typeof cloudinaryImages === 'string' 
+          ? JSON.parse(cloudinaryImages) 
+          : cloudinaryImages;
+        console.log('✅ Parsed cloudinaryImages:', parsedCloudinaryImages.length, 'images');
+      } catch (parseError) {
+        console.error('❌ Failed to parse cloudinaryImages:', parseError);
+        parsedCloudinaryImages = [];
+      }
+    }
 
     // 1️⃣ Validate required fields
     if (!name || !price || !category || !unit) {
@@ -135,14 +152,14 @@ export const createProduct = async (req, res) => {
     let additionalImages = [];
 
     // Priority 1: Use Cloudinary images from barcode scan
-    if (cloudinaryImages && Array.isArray(cloudinaryImages) && cloudinaryImages.length > 0) {
-      console.log('📸 Using pre-uploaded Cloudinary images:', cloudinaryImages.length);
+    if (parsedCloudinaryImages && Array.isArray(parsedCloudinaryImages) && parsedCloudinaryImages.length > 0) {
+      console.log('📸 Using pre-uploaded Cloudinary images:', parsedCloudinaryImages.length);
       
-      const mainImage = cloudinaryImages[0];
+      const mainImage = parsedCloudinaryImages[0];
       imageUrl = mainImage.url;
       imagePublicId = mainImage.publicId;
       
-      additionalImages = cloudinaryImages.slice(1).map(img => ({
+      additionalImages = parsedCloudinaryImages.slice(1).map(img => ({
         url: img.url,
         publicId: img.publicId
       }));
@@ -563,6 +580,13 @@ export const deleteProduct = async (req, res) => {
       });
     }
 
+    // Store product info for response before deletion
+    const deletedProductInfo = {
+      id: product._id,
+      name: product.name,
+      barcode: product.scannedBarcodeId
+    };
+
     // Delete images from Cloudinary
     try {
       if (product.imagePublicId) {
@@ -597,19 +621,21 @@ export const deleteProduct = async (req, res) => {
       console.error('Error deleting images from Cloudinary:', deleteError);
     }
 
-    // Soft delete - set isAvailable to false
-    product.isAvailable = false;
-    await product.save();
+    // HARD DELETE - Completely remove product from database
+    await Product.findByIdAndDelete(req.params.id);
+
+    console.log('🗑️ Product permanently deleted from database:', deletedProductInfo.name);
 
     res.status(200).json({
       success: true,
-      message: 'Product deleted successfully'
+      message: 'Product permanently deleted successfully',
+      deletedProduct: deletedProductInfo
     });
   } catch (error) {
     console.error('Delete Product Error:', error);
     res.status(500).json({ 
       success: false,
-      message: 'Server error', 
+      message: 'Server error during product deletion', 
       error: error.message 
     });
   }
@@ -1842,40 +1868,65 @@ export const createProductFromScanData = async (req, res) => {
     console.log('📦 Product:', name);
     console.log('📦 Barcode to assign:', scannedBarcodeId);
 
-    // 1️⃣ Validate required fields
-    if (!name || !name.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Product name is required',
-        field: 'name'
-      });
+    // 1️⃣ Validate ALL required fields with specific error messages
+    const requiredFields = [
+      { field: 'name', value: name, message: 'Product name is mandatory' },
+      { field: 'description', value: description, message: 'Product description is mandatory' },
+      { field: 'price', value: price, message: 'Price is mandatory' },
+      { field: 'category', value: category, message: 'Category is mandatory' },
+      { field: 'unit', value: unit, message: 'Unit is mandatory' },
+      { field: 'unitSize', value: unitSize, message: 'Unit size is mandatory' },
+      { field: 'stock', value: stock, message: 'Stock quantity is mandatory' },
+      { field: 'milkType', value: milkType, message: 'Milk type is mandatory' }
+    ];
+
+    for (const { field, value, message } of requiredFields) {
+      if (!value || (typeof value === 'string' && !value.trim())) {
+        return res.status(400).json({
+          success: false,
+          message: message,
+          field: field
+        });
+      }
     }
 
-    if (!price || isNaN(price) || Number(price) <= 0) {
+    // 2️⃣ Validate price format and value
+    if (isNaN(price) || Number(price) <= 0) {
       return res.status(400).json({
         success: false,
-        message: 'Valid price is required',
+        message: 'Valid price is required (must be a positive number)',
         field: 'price'
       });
     }
 
-    if (!category) {
+    // 3️⃣ Validate stock format and value
+    if (isNaN(stock) || Number(stock) < 0) {
       return res.status(400).json({
         success: false,
-        message: 'Category is required',
-        field: 'category'
+        message: 'Valid stock quantity is required (must be a non-negative number)',
+        field: 'stock'
       });
     }
 
-    if (!unit) {
+    // 4️⃣ Validate unitSize format
+    if (isNaN(unitSize) || Number(unitSize) <= 0) {
       return res.status(400).json({
         success: false,
-        message: 'Unit is required',
-        field: 'unit'
+        message: 'Valid unit size is required (must be a positive number)',
+        field: 'unitSize'
       });
     }
 
-    // 2️⃣ Check if barcode is already used using helper function
+    // 5️⃣ Validate discount if provided
+    if (discount && (isNaN(discount) || Number(discount) < 0 || Number(discount) > 100)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Discount must be a number between 0 and 100',
+        field: 'discount'
+      });
+    }
+
+    // 6️⃣ Check if barcode is already used using helper function
     if (scannedBarcodeId) {
       const { isUnique, existingProduct } = await checkBarcodeUniqueness(scannedBarcodeId);
       
@@ -1891,7 +1942,7 @@ export const createProductFromScanData = async (req, res) => {
       }
     }
 
-    // 3️⃣ Validate category exists
+    // 7️⃣ Validate category exists
     const categoryExists = await Category.findById(category);
     if (!categoryExists) {
       return res.status(400).json({
@@ -1901,7 +1952,7 @@ export const createProductFromScanData = async (req, res) => {
       });
     }
 
-    // 4️⃣ Check for duplicate product name
+    // 8️⃣ Check for duplicate product name
     const existingProduct = await Product.findOne({
       name: { $regex: new RegExp(`^${name.trim()}$`, 'i') },
       isAvailable: true
@@ -1915,7 +1966,7 @@ export const createProductFromScanData = async (req, res) => {
       });
     }
 
-    // 5️⃣ Handle images
+    // 9️⃣ Handle images
     let mainImageUrl = '/images/default-product.jpg';
     let additionalImages = [];
 
@@ -1923,6 +1974,17 @@ export const createProductFromScanData = async (req, res) => {
     
     if (images && images.length > 0) {
       console.log('📸 Images available:', images.length);
+      
+      // Validate each image has URL
+      for (let i = 0; i < images.length; i++) {
+        if (!images[i].url) {
+          return res.status(400).json({
+            success: false,
+            message: `Image ${i + 1} is missing URL`,
+            field: 'images'
+          });
+        }
+      }
       
       // Use first image as main image
       const firstImage = images[0];
@@ -1943,28 +2005,39 @@ export const createProductFromScanData = async (req, res) => {
       console.log('⚠️ No images provided, using default');
     }
 
-    // 6️⃣ Format tags
+    // 🔟 Format tags
     const formattedTags = typeof tags === 'string' 
       ? tags.split(',').map(tag => tag.trim()).filter(tag => tag)
       : (Array.isArray(tags) ? tags : []);
 
-    // 7️⃣ Format nutritional info
-    const formattedNutritionalInfo = typeof nutritionalInfo === 'string' 
-      ? JSON.parse(nutritionalInfo) 
-      : (nutritionalInfo || {});
+    // 1️⃣1️⃣ Format nutritional info
+    let formattedNutritionalInfo = {};
+    if (nutritionalInfo) {
+      try {
+        formattedNutritionalInfo = typeof nutritionalInfo === 'string' 
+          ? JSON.parse(nutritionalInfo) 
+          : (nutritionalInfo || {});
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid nutritional info format (must be valid JSON)',
+          field: 'nutritionalInfo'
+        });
+      }
+    }
 
-    // 8️⃣ Create product with scanned barcode
+    // 1️⃣2️⃣ Create product with scanned barcode
     console.log('🚀 Creating product in database with barcode:', scannedBarcodeId);
     
     const product = new Product({
       name: name.trim(),
-      description: description?.trim() || '',
+      description: description.trim(),
       price: Number(price),
       category,
       unit,
-      unitSize: unitSize || '1',
-      stock: Number(stock) || 0,
-      milkType: milkType || 'Cow',
+      unitSize: Number(unitSize),
+      stock: Number(stock),
+      milkType: milkType,
       image: mainImageUrl,
       imagePublicId: null,
       images: additionalImages,
@@ -1982,7 +2055,7 @@ export const createProductFromScanData = async (req, res) => {
     await product.populate('category', 'name');
     console.log('✅ Product populated with category');
 
-    // 9️⃣ Return created product
+    // 1️⃣3️⃣ Return created product
     const createdProduct = await Product.findById(product._id)
       .populate('category', 'name');
 
