@@ -2,7 +2,7 @@
 
 import express from 'express';
 import auth from '../middlewares/auth.js';
-
+import { calculateOrderPricing } from '../controllers/inventory.controller.js'; // Add import
 import {
   getRetailerInventory,
   addProductToInventory,
@@ -65,7 +65,7 @@ router.get('/analytics', getInventoryAnalytics);
 router.put('/products/:inventoryId/pricing-slabs', updatePricingSlabs);
 router.post('/calculate-price', calculatePriceForQuantity);
 router.post('/bulk-calculate-prices', bulkCalculatePrices);
-
+router.post('/calculate-order-pricing', calculateOrderPricing);
 router.delete('/products/:inventoryId', deleteInventoryItem);
 router.delete('/products/:inventoryId/force', forceDeleteInventoryItem); // Optional
 

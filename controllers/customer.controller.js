@@ -7,73 +7,90 @@ import { assignNearestRetailer } from '../utils/retailerAssignment.js';
 import { validateCoordinates } from '../utils/locationUtils.js';
 
 // Create or Update Customer Profile
+// export const createUpdateProfile 
 export const createUpdateProfile = async (req, res) => {
   try {
     const userId = req.user?.id || req.user?._id;
     const { personalInfo, deliveryAddress } = req.body;
 
-    // Convert empty strings to null for date fields and validate date
+    // Process DOB
     const processedPersonalInfo = { ...personalInfo };
-    if (processedPersonalInfo.dateOfBirth && processedPersonalInfo.dateOfBirth.trim() !== '') {
+    if (processedPersonalInfo.dateOfBirth && processedPersonalInfo.dateOfBirth.trim() !== "") {
       const date = new Date(processedPersonalInfo.dateOfBirth);
       processedPersonalInfo.dateOfBirth = isNaN(date.getTime()) ? null : date;
     } else {
       processedPersonalInfo.dateOfBirth = null;
     }
 
-    let customer = await Customer.findOne({ user: userId });
+    // Check if customer profile already exists
+    const existingProfile = await Customer.findOne({ user: userId });
 
-    if (customer) {
-      // Update existing profile
-      customer.personalInfo = { ...customer.personalInfo, ...processedPersonalInfo };
-      customer.deliveryAddress = { ...customer.deliveryAddress, ...deliveryAddress };
-    } else {
-      // Create new profile
-      customer = new Customer({
-        user: userId,
-        personalInfo: processedPersonalInfo,
-        deliveryAddress
+    if (existingProfile) {
+      return res.status(400).json({
+        message: "Profile already exists. Update is not allowed."
       });
     }
 
-    // Ensure coordinates is always present in deliveryAddress
-    if (!customer.deliveryAddress) customer.deliveryAddress = {};
-    if (!customer.deliveryAddress.coordinates) {
-      customer.deliveryAddress.coordinates = { latitude: null, longitude: null };
-    }
+    // Create new customer profile
+    const customer = new Customer({
+      user: userId,
+      personalInfo: processedPersonalInfo,
+      deliveryAddress: {
+        ...deliveryAddress,
+        coordinates: deliveryAddress?.coordinates || {
+          latitude: null,
+          longitude: null
+        }
+      }
+    });
 
     await customer.save();
 
-    // Link customer profile to user
+    // Link to User
     await User.findByIdAndUpdate(userId, { customerProfile: customer._id });
 
-    // If coordinates provided, try assigning nearest retailer (Admin as retailer)
-    const coords = customer.deliveryAddress?.coordinates;
-    if (coords && typeof coords.latitude === 'number' && typeof coords.longitude === 'number') {
-      try {
-        const result = await assignNearestRetailer(coords.latitude, coords.longitude);
-        if (result?.retailer) {
-          customer.assignedRetailer = result.retailer._id; // Admin document _id
-          customer.assignedOn = new Date();
-          await customer.save();
-          console.log('✅ Retailer auto-assigned on profile save:', result.retailer.shopName);
-        } else {
-          console.log('⚠ No retailer found when saving profile');
-        }
-      } catch (err) {
-        console.error('Error assigning retailer on profile save:', err);
-      }
-    }
+    // Auto assign retailer if coordinates exist
+    await autoAssignRetailer(customer);
 
-    res.status(200).json({
-      message: 'Profile saved successfully',
+    return res.status(201).json({
+      message: "Profile created successfully",
       customer
     });
+
   } catch (error) {
-    console.error('createUpdateProfile error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    console.error("createUserProfile error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
+
+// ------------------------------
+// Retailer assignment helper
+// ------------------------------
+const autoAssignRetailer = async (customer) => {
+  try {
+    const coords = customer.deliveryAddress?.coordinates;
+
+    if (
+      coords &&
+      typeof coords.latitude === "number" &&
+      typeof coords.longitude === "number"
+    ) {
+      const result = await assignNearestRetailer(coords.latitude, coords.longitude);
+
+      if (result?.retailer) {
+        customer.assignedRetailer = result.retailer._id;
+        customer.assignedOn = new Date();
+        await customer.save();
+
+        console.log("✅ Retailer auto-assigned:", result.retailer.shopName);
+      }
+    }
+  } catch (err) {
+    console.error("Retailer assignment error:", err);
+  }
+};
+
 
 // Get Customer Profile
 export const getProfile = async (req, res) => {

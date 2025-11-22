@@ -223,7 +223,8 @@ export async function sendOTP(req, res) {
 
     res.status(200).json({ 
       success: true,
-      message: 'OTP sent successfully' 
+      message: `OTP sent successfully. Otp is ${otpCode}`,
+      otp:otpCode
     });
   } catch (error) {
     console.error('Send OTP Error:', error);

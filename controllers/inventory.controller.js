@@ -5,7 +5,8 @@ import InventoryService from '../services/inventory.service.js';
 import Admin from '../models/admin.model.js';
 import InventoryLog from '../models/inventoryLog.model.js'; // ✅ ADD THIS IMPORT
 import CacheService from '../services/cache.service.js'; // ✅ ADD THIS IMPORT
-
+// In inventory.controller.js - ADD THIS IMPORT
+import RevenueCalculationService from '../services/revenueCalculation.service.js'; // Add this line
 
 // Validation rules
 // CORRECT VALIDATION MIDDLEWARE - Update this
@@ -808,4 +809,55 @@ export const getRevenueAnalytics = asyncHandler(async (req, res) => {
       message: error.message
     });
   }
-});                // TEJAS
+});     
+
+
+/**
+ * @desc    Calculate order pricing with per-piece discounts
+ * @route   POST /api/retailer/inventory/calculate-order-pricing
+ * @access  Private (Retailer)
+ */
+export const calculateOrderPricing = [
+    body('items')
+        .isArray({ min: 1 })
+        .withMessage('Items array is required'),
+    body('items.*.productId')
+        .isMongoId()
+        .withMessage('Valid product ID is required'),
+    body('items.*.quantity')
+        .isInt({ min: 1 })
+        .withMessage('Quantity must be a positive integer'),
+
+    asyncHandler(async (req, res) => {
+        try {
+            const errors = validationResult(req);
+            if (!errors.isEmpty()) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Validation failed',
+                    errors: errors.array()
+                });
+            }
+
+            const { items } = req.body;
+            const retailer = await getRetailerFromUser(req.user._id);
+
+            const orderPricing = await InventoryService.calculateOrderPricing(
+                retailer._id,
+                items
+            );
+
+            res.json({
+                success: true,
+                data: orderPricing
+            });
+
+        } catch (error) {
+            console.error('Calculate order pricing error:', error);
+            res.status(500).json({
+                success: false,
+                message: error.message
+            });
+        }
+    })
+];
