@@ -11,7 +11,6 @@ const productSchema = new mongoose.Schema({
   },
   description: {
     type: String,
-    required: true,
     trim: true,
     maxlength: [500, 'Description cannot exceed 500 characters']
   },
@@ -24,6 +23,11 @@ const productSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Category',
     required: [true, 'Product category is required']
+  },
+  brand: {
+    type: String,
+    trim: true,
+    maxlength: [50, 'Brand name cannot exceed 50 characters']
   },
   image: {
     type: String,
@@ -254,12 +258,18 @@ productSchema.virtual('stockStatus').get(function() {
   return 'in-stock';
 });
 
+// Get product display name with brand
+productSchema.virtual('displayName').get(function() {
+  return `${this.brand} ${this.name}`;
+});
+
 // =============================================
 // INDEXES FOR OPTIMIZED QUERIES
 // =============================================
 
 // Single field indexes
 productSchema.index({ category: 1 });
+productSchema.index({ brand: 1 });
 productSchema.index({ isAvailable: 1 });
 productSchema.index({ isFeatured: 1 });
 productSchema.index({ milkType: 1 });
@@ -276,15 +286,18 @@ productSchema.index({ qrCodeId: 1 }, { sparse: true });
 
 // Compound indexes for common queries
 productSchema.index({ isAvailable: 1, category: 1 });
+productSchema.index({ isAvailable: 1, brand: 1 });
 productSchema.index({ isAvailable: 1, isFeatured: 1 });
 productSchema.index({ isAvailable: 1, milkType: 1 });
 productSchema.index({ isAvailable: 1, price: 1 });
 productSchema.index({ category: 1, isAvailable: 1, price: 1 });
+productSchema.index({ brand: 1, isAvailable: 1 });
 
-// Text search index
+// Text search index (updated to include brand)
 productSchema.index({ 
   name: 'text', 
   description: 'text', 
+  brand: 'text',
   tags: 'text' 
 });
 
@@ -382,6 +395,14 @@ productSchema.statics.findByBarcode = function(barcodeId) {
   }).populate('category', 'name');
 };
 
+// Find products by brand
+productSchema.statics.findByBrand = function(brand) {
+  return this.find({
+    brand: new RegExp(brand, 'i'),
+    isAvailable: true
+  }).populate('category', 'name');
+};
+
 // Find products with barcode status
 productSchema.statics.findByBarcodeStatus = function(status) {
   let filter = { isAvailable: true };
@@ -417,6 +438,21 @@ productSchema.statics.findWithQRCode = function() {
     qrCodeUrl: { $exists: true, $ne: null },
     qrCodeId: { $exists: true, $ne: null }
   }).populate('category', 'name');
+};
+
+// Get brand statistics
+productSchema.statics.getBrandStats = function() {
+  return this.aggregate([
+    { $match: { isAvailable: true } },
+    {
+      $group: {
+        _id: '$brand',
+        count: { $sum: 1 },
+        averagePrice: { $avg: '$price' }
+      }
+    },
+    { $sort: { count: -1 } }
+  ]);
 };
 
 // Get barcode statistics
@@ -485,6 +521,7 @@ productSchema.methods.getBarcodeAssignmentInfo = async function(barcodeId) {
     conflict: conflicts ? {
       productId: conflicts._id,
       productName: conflicts.name,
+      brand: conflicts.brand,
       barcodeType: conflicts.scannedBarcodeId === barcodeId ? 'scanned' : 'generated'
     } : null
   };
@@ -522,7 +559,7 @@ productSchema.methods.setScannedBarcode = async function(barcodeId) {
   const assignmentInfo = await this.getBarcodeAssignmentInfo(barcodeId);
   
   if (!assignmentInfo.canAssign) {
-    throw new Error(`Cannot assign barcode "${barcodeId}". ${assignmentInfo.conflict ? `Already assigned to ${assignmentInfo.conflict.productName}` : 'Invalid barcode'}`);
+    throw new Error(`Cannot assign barcode "${barcodeId}". ${assignmentInfo.conflict ? `Already assigned to ${assignmentInfo.conflict.brand} ${assignmentInfo.conflict.productName}` : 'Invalid barcode'}`);
   }
   
   this.scannedBarcodeId = barcodeId;
@@ -543,6 +580,33 @@ productSchema.methods.getIdentificationSummary = function() {
     barcodeType: this.barcodeType,
     activeBarcodeId: this.activeBarcodeId,
     qrCodeUrl: this.qrCodeUrl
+  };
+};
+
+// Get product full info with brand
+productSchema.methods.getFullInfo = function() {
+  return {
+    id: this._id,
+    name: this.name,
+    brand: this.brand,
+    displayName: this.displayName,
+    description: this.description,
+    price: this.price,
+    discountedPrice: this.discountedPrice,
+    category: this.category,
+    unit: this.unit,
+    unitSize: this.unitSize,
+    milkType: this.milkType,
+    isAvailable: this.isAvailable,
+    isFeatured: this.isFeatured,
+    discount: this.discount,
+    rating: this.rating,
+    nutritionalInfo: this.nutritionalInfo,
+    tags: this.tags,
+    images: this.images,
+    barcodeInfo: this.barcodeInfo,
+    createdAt: this.createdAt,
+    updatedAt: this.updatedAt
   };
 };
 
@@ -573,6 +637,14 @@ productSchema.query.onSale = function() {
 // Query helper for products by category
 productSchema.query.byCategory = function(categoryId) {
   return this.where({ category: categoryId, isAvailable: true });
+};
+
+// Query helper for products by brand
+productSchema.query.byBrand = function(brand) {
+  return this.where({ 
+    brand: new RegExp(brand, 'i'), 
+    isAvailable: true 
+  });
 };
 
 // Query helper for products by milk type
