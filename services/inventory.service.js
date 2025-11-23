@@ -340,11 +340,11 @@ class InventoryService {
             // Get all DELIVERED orders (completed transactions) within date range
             const deliveredOrders = await Order.find({
                 assignedRetailer: retailerId,
-                orderStatus: 'delivered',
-                deliveredAt: {
-                    $gte: startDate,
-                    $lte: endDate
-                }
+                 orderStatus: { $in: ['delivered', 'completed'] },
+                $or: [
+                { deliveredAt: { $gte: startDate, $lte: endDate } },
+                { createdAt: { $gte: startDate, $lte: endDate } } // ✅ Fallback to createdAt
+            ]
             }).populate('items.product', 'name category');
 
             console.log(`📦 Found ${deliveredOrders.length} delivered orders for revenue calculation`);
@@ -1481,66 +1481,73 @@ class InventoryService {
      * Get inventory statistics for dashboard WITH REVENUE
      */
     async getInventoryDashboardStats(retailerId, timeFilter = 'all') {
-        try {
-            const revenueMetrics = await this.calculateRevenueMetrics(retailerId, timeFilter);
-            
-            const [
-                totalProducts,
-                lowStockItems,
-                outOfStockItems,
-                recentActivity
-            ] = await Promise.all([
-                RetailerInventory.countDocuments({ retailer: retailerId, isActive: true }),
-                RetailerInventory.countDocuments({ 
-                    retailer: retailerId, 
-                    isActive: true,
-                    lowStockAlert: true 
-                }),
-                RetailerInventory.countDocuments({ 
-                    retailer: retailerId, 
-                    isActive: true,
-                    currentStock: 0 
-                }),
-                InventoryLog.find({ retailer: retailerId })
-                    .populate('product', 'name')
-                    .sort({ createdAt: -1 })
-                    .limit(5)
-                    .lean()
-            ]);
-
-            // Calculate inventory value
-            const inventoryItems = await RetailerInventory.find({ 
+    try {
+        const revenueMetrics = await this.calculateRevenueMetrics(retailerId, timeFilter);
+        
+        const [
+            totalProducts,
+            lowStockItems,
+            outOfStockItems,
+            recentActivity,
+            completedOrdersCount
+        ] = await Promise.all([
+            RetailerInventory.countDocuments({ retailer: retailerId, isActive: true }),
+            RetailerInventory.countDocuments({ 
                 retailer: retailerId, 
-                isActive: true 
-            });
-            
-            let totalInventoryValue = 0;
-            inventoryItems.forEach(item => {
-                totalInventoryValue += (item.currentStock || 0) * (item.sellingPrice || 0);
-            });
+                isActive: true,
+                lowStockAlert: true 
+            }),
+            RetailerInventory.countDocuments({ 
+                retailer: retailerId, 
+                isActive: true,
+                currentStock: 0 
+            }),
+            InventoryLog.find({ retailer: retailerId })
+                .populate('product', 'name')
+                .sort({ createdAt: -1 })
+                .limit(5)
+                .lean(),
+            // ✅ FIXED: Proper Order model usage
+            Order.countDocuments({ 
+                assignedRetailer: retailerId,
+                orderStatus: { $in: ['delivered', 'completed'] }
+            })
+        ]);
 
-            return {
-                totalProducts,
-                lowStockItems,
-                outOfStockItems,
-                recentActivity,
-                totalInventoryValue: Math.round(totalInventoryValue * 100) / 100,
-                totalSales: revenueMetrics.totalSales,
-                totalRevenue: revenueMetrics.totalRevenue,
-                totalItemsSold: revenueMetrics.totalItemsSold,
-                profitMargin: revenueMetrics.profitMargin,
-                averageOrderValue: revenueMetrics.averageOrderValue,
-                timestamp: new Date(),
-                timePeriod: {
-                    filter: timeFilter,
-                    ...this.getDateRange(timeFilter)
-                }
-            };
-        } catch (error) {
-            console.error('Get dashboard stats error:', error);
-            throw error;
-        }
+        // Calculate inventory value
+        const inventoryItems = await RetailerInventory.find({ 
+            retailer: retailerId, 
+            isActive: true 
+        });
+        
+        let totalInventoryValue = 0;
+        inventoryItems.forEach(item => {
+            totalInventoryValue += (item.currentStock || 0) * (item.sellingPrice || 0);
+        });
+
+        return {
+            totalProducts,
+            lowStockItems,
+            outOfStockItems,
+            recentActivity,
+            totalCompletedOrders: completedOrdersCount,
+            totalInventoryValue: Math.round(totalInventoryValue * 100) / 100,
+            totalSales: revenueMetrics.totalSales,
+            totalRevenue: revenueMetrics.totalRevenue,
+            totalItemsSold: revenueMetrics.totalItemsSold,
+            profitMargin: revenueMetrics.profitMargin,
+            averageOrderValue: revenueMetrics.averageOrderValue,
+            timestamp: new Date(),
+            timePeriod: {
+                filter: timeFilter,
+                ...this.getDateRange(timeFilter)
+            }
+        };
+    } catch (error) {
+        console.error('Get dashboard stats error:', error);
+        throw error;
     }
+}
 
     /**
      * Helper method to get valid reason values for debugging

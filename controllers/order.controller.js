@@ -452,6 +452,9 @@ export const createOrder = async (req, res) => {
 // @desc    Create offline order WITH COMPLETE DISCOUNT CALCULATION
 // @route   POST /api/orders/offline
 // @access  Private/Retailer
+// @desc    Create offline order WITH COMPLETE DISCOUNT CALCULATION
+// @route   POST /api/orders/offline
+// @access  Private/Retailer
 export const createOfflineOrder = async (req, res) => {
   const session = await mongoose.startSession();
   let transactionStarted = false;
@@ -599,7 +602,12 @@ export const createOfflineOrder = async (req, res) => {
     }
 
     const finalPaymentStatus = paymentStatus || 'pending';
-    const orderStatus = finalPaymentStatus === 'paid' ? 'completed' : 'pending';
+    
+    // ✅ FIXED: For offline orders, if payment is paid, order should be completed
+    let orderStatus = 'pending';
+    if (finalPaymentStatus === 'paid') {
+      orderStatus = 'completed'; // Changed from 'completed' to 'completed'
+    }
 
     console.log('🎯 Final order status:', {
       paymentStatus: finalPaymentStatus,
@@ -627,7 +635,7 @@ export const createOfflineOrder = async (req, res) => {
         serviceRadius: retailer.serviceRadius
       },
       reservationStatus: 'not_reserved',
-      orderStatus: orderStatus,
+      orderStatus: orderStatus, // ✅ Use the corrected orderStatus
       deliveryDate: new Date(),
       customerName: customerName || 'Walk-in Customer',
       customerPhone: customerPhone || '',
@@ -671,7 +679,7 @@ export const createOfflineOrder = async (req, res) => {
 
       await order.save({ session });
 
-      // If payment is paid, mark as delivered and deduct stock
+      // ✅ FIXED: If payment is paid, mark as delivered and update order status
       let deliveryResult = null;
       if (finalPaymentStatus === 'paid') {
         deliveryResult = await inventoryService.confirmOrderDelivery(
@@ -682,6 +690,8 @@ export const createOfflineOrder = async (req, res) => {
 
         order.reservationStatus = 'delivered';
         order.deliveredAt = new Date();
+        // ✅ Ensure order status is also updated to completed
+        order.orderStatus = 'completed';
         await order.save({ session });
         
         console.log('✅ Offline order completed with stock deduction');
@@ -710,7 +720,7 @@ export const createOfflineOrder = async (req, res) => {
           totalAmount: order.totalAmount,
           finalAmount: order.finalAmount,
           discount: order.discount,
-          orderStatus: order.orderStatus,
+          orderStatus: order.orderStatus, // ✅ This will now show 'completed' for paid orders
           paymentStatus: order.paymentStatus,
           reservationStatus: order.reservationStatus,
           orderType: order.orderType,
@@ -783,6 +793,162 @@ export const createOfflineOrder = async (req, res) => {
     } catch (sessionError) {
       console.error('❌ Error ending session:', sessionError);
     }
+  }
+};
+
+
+
+export const cancelOfflineOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+  
+  try {
+    session.startTransaction();
+
+    const retailerId = req.user._id;
+    const orderIdentifier = req.params.id;
+    const { reason } = req.body;
+
+    console.log('🔄 Cancelling offline order:', { orderIdentifier, retailerId, reason });
+
+    // Verify retailer exists
+    const retailer = await Admin.findOne({ user: retailerId });
+    if (!retailer) {
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: 'Retailer profile not found'
+      });
+    }
+
+    // Find the order
+    const order = await findOrderById(orderIdentifier);
+    if (!order) {
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    // Verify order belongs to this retailer and is offline
+    if (order.orderType !== 'offline') {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Only offline orders can be cancelled through this endpoint'
+      });
+    }
+
+    if (order.processedBy.toString() !== retailer._id.toString()) {
+      await session.abortTransaction();
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to cancel this order'
+      });
+    }
+
+    // Check if order is already cancelled
+    if (order.orderStatus === 'cancelled') {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Order is already cancelled'
+      });
+    }
+    
+
+    // Check if order is delivered (can't cancel delivered orders)
+    if (order.orderStatus === 'delivered' || order.orderStatus === 'cancelled') {
+  await session.abortTransaction();
+  return res.status(400).json({
+    success: false,
+    message: `Cannot cancel orders with ${order.orderStatus} status`
+  });
+}
+
+    console.log('📦 Restoring inventory for cancelled offline order...');
+
+    // RESTORE INVENTORY STOCK
+    let stockRestoreResult = null;
+    try {
+      // Since offline orders immediately deduct stock, we need to add it back
+      for (const item of order.items) {
+        const productId = item.product;
+        const quantity = item.quantity;
+
+        console.log(`🔄 Restoring ${quantity} units of product ${productId}`);
+
+        // Add stock back to inventory
+        const restoreResult = await inventoryService.updateStock({
+          retailerId: retailer._id,
+          productId: productId,
+          quantity: quantity,
+          transactionType: 'STOCK_IN',
+          reason: 'OFFLINE_ORDER_CANCELLATION',
+          notes: `Stock restored due to offline order cancellation: ${order.orderId}`,
+          userId: retailerId,
+          referenceType: 'ORDER',
+          referenceId: order._id
+        });
+
+        console.log(`✅ Restored ${quantity} units for product ${productId}`);
+      }
+
+      stockRestoreResult = {
+        success: true,
+        itemsRestored: order.items.length,
+        totalQuantityRestored: order.items.reduce((sum, item) => sum + item.quantity, 0)
+      };
+
+    } catch (inventoryError) {
+      await session.abortTransaction();
+      console.error('❌ Inventory restoration failed:', inventoryError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to restore inventory: ' + inventoryError.message
+      });
+    }
+
+    // Update order status to cancelled
+    order.orderStatus = 'cancelled';
+    order.reservationStatus = 'cancelled';
+    order.cancellationReason = reason || 'Customer denied purchase';
+    order.updatedAt = new Date();
+    
+    await order.save({ session });
+
+    await session.commitTransaction();
+
+    console.log('✅ Offline order cancelled successfully:', {
+      orderId: order.orderId,
+      itemsRestored: order.items.length,
+      reason: order.cancellationReason
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Offline order cancelled successfully and inventory restored',
+      order: {
+        _id: order._id,
+        orderId: order.orderId,
+        orderStatus: order.orderStatus,
+        orderType: order.orderType,
+        cancellationReason: order.cancellationReason,
+        cancelledAt: order.updatedAt
+      },
+      inventoryRestored: stockRestoreResult
+    });
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Cancel Offline Order Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while cancelling offline order',
+      error: error.message
+    });
+  } finally {
+    session.endSession();
   }
 };
 
@@ -1819,6 +1985,11 @@ export const markOrderAsPaid = async (req, res) => {
 
     // ✅ FIXED: Only update paymentStatus, leave orderStatus unchanged
     order.paymentStatus = 'paid';
+
+    // ✅ ADD: Also update orderStatus to 'completed' for paid offline orders
+if (order.orderType === 'offline') {
+  order.orderStatus = 'completed';
+}
     
     // ✅ FIXED: Handle stock deduction if reserved, but don't change orderStatus
     if (order.reservationStatus === 'reserved') {

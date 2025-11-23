@@ -12,7 +12,8 @@ import {
   getRetailerOrderStats,
   updateOrderStatusByRetailer,
   markOrderDelivered,
-  markOrderAsPaid 
+  markOrderAsPaid,
+  cancelOfflineOrder
 } from '../controllers/order.controller.js';
 import { generateInvoice } from '../controllers/invoice.controller.js';
 import auth from '../middlewares/auth.js';
@@ -32,6 +33,7 @@ router.put('/:id/cancel', cancelOrder);
 // ==================== RETAILER ROUTES ====================
 // Offline orders
 router.post('/offline', createOfflineOrder);
+router.put('/offline/:id/cancel', cancelOfflineOrder);
 
 // ✅ FIXED: Add the missing mark-paid route
 router.put('/:id/mark-paid', markOrderAsPaid);
