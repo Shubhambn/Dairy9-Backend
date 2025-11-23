@@ -2,7 +2,6 @@
 
 import express from 'express';
 import auth from '../middlewares/auth.js';
-import { calculateOrderPricing } from '../controllers/inventory.controller.js'; // Add import
 import {
   getRetailerInventory,
   addProductToInventory,
@@ -16,7 +15,15 @@ import {
   forceDeleteInventoryItem,
   updatePricingSlabs,
   calculatePriceForQuantity,
-  bulkCalculatePrices
+  bulkCalculatePrices,
+  calculateOrderPricing,
+  // 🔥 NEW: Price validation endpoints
+  validateInventoryPrices,
+  getValidatedProductPrice,
+  getBulkValidatedPrices,
+  // Dashboard endpoints
+  getInventoryDashboard,
+  getRevenueAnalytics
 } from '../controllers/inventory.controller.js';
 
 const router = express.Router();
@@ -51,6 +58,23 @@ router.get('/', getRetailerInventory);
 router.post('/products', addProductToInventory);
 router.put('/stock', updateInventoryStock);
 router.put('/products/:inventoryId', updateInventoryItem);
+router.delete('/products/:inventoryId', deleteInventoryItem);
+router.delete('/products/:inventoryId/force', forceDeleteInventoryItem);
+
+/* ----------------------------------------------
+   🔥 NEW: PRICE VALIDATION & CORRECTION ENDPOINTS
+------------------------------------------------*/
+router.post('/validate-prices', validateInventoryPrices);
+router.get('/product-price/:productId', getValidatedProductPrice);
+router.post('/bulk-validated-prices', getBulkValidatedPrices);
+
+/* ----------------------------------------------
+   PRICING SLABS & CALCULATION ENDPOINTS
+------------------------------------------------*/
+router.put('/products/:inventoryId/pricing-slabs', updatePricingSlabs);
+router.post('/calculate-price', calculatePriceForQuantity);
+router.post('/bulk-calculate-prices', bulkCalculatePrices);
+router.post('/calculate-order-pricing', calculateOrderPricing);
 
 /* ----------------------------------------------
    REPORTING & ANALYTICS
@@ -58,15 +82,7 @@ router.put('/products/:inventoryId', updateInventoryItem);
 router.get('/alerts/low-stock', getLowStockAlerts);
 router.get('/logs', getInventoryLogs);
 router.get('/analytics', getInventoryAnalytics);
-
-/* ----------------------------------------------
-   PRICING SLABS MANAGEMENT
-------------------------------------------------*/
-router.put('/products/:inventoryId/pricing-slabs', updatePricingSlabs);
-router.post('/calculate-price', calculatePriceForQuantity);
-router.post('/bulk-calculate-prices', bulkCalculatePrices);
-router.post('/calculate-order-pricing', calculateOrderPricing);
-router.delete('/products/:inventoryId', deleteInventoryItem);
-router.delete('/products/:inventoryId/force', forceDeleteInventoryItem); // Optional
+router.get('/dashboard', getInventoryDashboard);
+router.get('/revenue-analytics', getRevenueAnalytics);
 
 export default router;   //TEJAS

@@ -445,32 +445,43 @@ export const createOrder = async (req, res) => {
   }
 };
 
-// In your order controller - Enhanced offline order creation
+
+// @desc    Create offline order WITH COMPLETE DISCOUNT CALCULATION
+// @route   POST /api/orders/offline
+// @access  Private/Retailer
 // @desc    Create offline order WITH COMPLETE DISCOUNT CALCULATION
 // @route   POST /api/orders/offline
 // @access  Private/Retailer
 export const createOfflineOrder = async (req, res) => {
   const session = await mongoose.startSession();
+  let transactionStarted = false;
 
   try {
+    console.log('🔄 Starting transaction for offline order...');
     session.startTransaction();
+    transactionStarted = true;
+    console.log('✅ Transaction started successfully');
 
     const retailerId = req.user._id;
     const {
       items,
       paymentMethod,
+      paymentStatus,
       specialInstructions,
       customerName,
       customerPhone,
       total,
       subtotal,
-      discount
+      discount,
+      orderType = 'offline'
     } = req.body;
+
+    console.log('💰 Creating offline order with payment status:', paymentStatus);
 
     // Verify retailer exists and is active
     const retailer = await Admin.findOne({ user: retailerId, isActive: true });
     if (!retailer) {
-      await session.abortTransaction();
+      await safeAbortTransaction(session, transactionStarted);
       return res.status(404).json({
         success: false,
         message: 'Retailer profile not found or inactive'
@@ -491,7 +502,7 @@ export const createOfflineOrder = async (req, res) => {
     for (const item of items) {
       const product = await Product.findById(item.productId);
       if (!product) {
-        await session.abortTransaction();
+        await safeAbortTransaction(session, transactionStarted);
         return res.status(400).json({
           success: false,
           message: `Product not found: ${item.productId}`
@@ -499,7 +510,7 @@ export const createOfflineOrder = async (req, res) => {
       }
 
       if (!product.isAvailable) {
-        await session.abortTransaction();
+        await safeAbortTransaction(session, transactionStarted);
         return res.status(400).json({
           success: false,
           message: `Product not available: ${product.name}`
@@ -513,7 +524,7 @@ export const createOfflineOrder = async (req, res) => {
         return inventoryProductId === itemProductId;
       });
 
-      // Calculate pricing with discounts - USING THE SAME LOGIC
+      // Calculate pricing with discounts
       const pricing = calculateOrderItemPricing(product, inventoryItem, item.quantity);
 
       let finalPrice = pricing.currentPrice;
@@ -545,7 +556,6 @@ export const createOfflineOrder = async (req, res) => {
         productName: product.name,
         barcodeId: item.barcodeId,
         scannedBarcodeId: item.scannedBarcodeId,
-        // COMPLETE DISCOUNT DETAILS - SAME AS ONLINE ORDERS
         discountDetails: {
           basePrice: pricing.basePrice,
           currentPrice: pricing.currentPrice,
@@ -555,8 +565,7 @@ export const createOfflineOrder = async (req, res) => {
           itemTotal: pricing.itemTotal,
           baseTotal: pricing.baseTotal,
           isExtendedRange: pricing.isExtendedRange,
-          appliedSlab: pricing.currentAppliedSlab,
-          singlePieceDiscount: pricing.singlePieceDiscount
+          appliedSlab: pricing.currentAppliedSlab
         }
       });
     }
@@ -574,19 +583,28 @@ export const createOfflineOrder = async (req, res) => {
       providedSubtotal: subtotal,
       finalTotal,
       finalSubtotal,
-      finalDiscount
+      finalDiscount,
+      paymentStatus: paymentStatus
     });
 
     // Check retailer inventory availability
     const stockCheck = await inventoryService.checkStockAvailability(retailer._id, items);
     if (!stockCheck.allAvailable) {
-      await session.abortTransaction();
+      await safeAbortTransaction(session, transactionStarted);
       return res.status(400).json({
         success: false,
         message: 'Some items are out of stock',
         stockDetails: stockCheck.items
       });
     }
+
+    const finalPaymentStatus = paymentStatus || 'pending';
+    const orderStatus = finalPaymentStatus === 'paid' ? 'completed' : 'pending';
+
+    console.log('🎯 Final order status:', {
+      paymentStatus: finalPaymentStatus,
+      orderStatus: orderStatus
+    });
 
     // Create offline order with discount summary
     const order = new Order({
@@ -596,9 +614,9 @@ export const createOfflineOrder = async (req, res) => {
       finalAmount: finalTotal,
       discount: finalDiscount,
       paymentMethod: paymentMethod || 'cash',
-      paymentStatus: 'paid',
+      paymentStatus: finalPaymentStatus,
       specialInstructions,
-      orderType: 'offline',
+      orderType: orderType,
       processedBy: retailer._id,
       assignedRetailer: retailer._id,
       assignmentDetails: {
@@ -609,12 +627,11 @@ export const createOfflineOrder = async (req, res) => {
         serviceRadius: retailer.serviceRadius
       },
       reservationStatus: 'not_reserved',
-      orderStatus: 'delivered',
+      orderStatus: orderStatus,
       deliveryDate: new Date(),
-      customerName,
-      customerPhone,
+      customerName: customerName || 'Walk-in Customer',
+      customerPhone: customerPhone || '',
       priceSource: orderItems.some(item => item.isPriceOverridden) ? 'retailer_inventory' : 'catalog',
-      // COMPLETE DISCOUNT SUMMARY
       discountSummary: {
         totalDiscount: finalDiscount,
         totalBaseAmount: finalSubtotal,
@@ -654,18 +671,26 @@ export const createOfflineOrder = async (req, res) => {
 
       await order.save({ session });
 
-      // Immediately mark as delivered and deduct stock
-      const deliveryResult = await inventoryService.confirmOrderDelivery(
-        order._id,
-        retailer._id,
-        req.user._id
-      );
+      // If payment is paid, mark as delivered and deduct stock
+      let deliveryResult = null;
+      if (finalPaymentStatus === 'paid') {
+        deliveryResult = await inventoryService.confirmOrderDelivery(
+          order._id,
+          retailer._id,
+          req.user._id
+        );
 
-      order.reservationStatus = 'delivered';
-      order.deliveredAt = new Date();
-      await order.save({ session });
+        order.reservationStatus = 'delivered';
+        order.deliveredAt = new Date();
+        await order.save({ session });
+        
+        console.log('✅ Offline order completed with stock deduction');
+      }
 
+      console.log('🔄 Committing transaction...');
       await session.commitTransaction();
+      transactionStarted = false;
+      console.log('✅ Transaction committed successfully');
 
       // Populate order for response
       await order.populate('items.product', 'name image unit');
@@ -678,7 +703,7 @@ export const createOfflineOrder = async (req, res) => {
 
       res.status(201).json({
         success: true,
-        message: 'Offline order created and completed successfully',
+        message: `Offline order created ${finalPaymentStatus === 'paid' ? 'and completed' : ''} successfully`,
         order: {
           _id: order._id,
           orderId: order.orderId,
@@ -686,6 +711,7 @@ export const createOfflineOrder = async (req, res) => {
           finalAmount: order.finalAmount,
           discount: order.discount,
           orderStatus: order.orderStatus,
+          paymentStatus: order.paymentStatus,
           reservationStatus: order.reservationStatus,
           orderType: order.orderType,
           items: order.items.map(item => ({
@@ -703,7 +729,6 @@ export const createOfflineOrder = async (req, res) => {
             unit: item.unit,
             productName: item.productName,
             itemTotal: item.quantity * item.price,
-            // Include complete discount details
             discountDetails: item.discountDetails
           })),
           customerName: order.customerName,
@@ -717,15 +742,20 @@ export const createOfflineOrder = async (req, res) => {
         },
         inventoryUpdate: {
           reserved: reservationResult.reservedItems.length,
-          delivered: deliveryResult.deliveredItems?.length || 0
+          delivered: finalPaymentStatus === 'paid' ? (deliveryResult?.deliveredItems?.length || 0) : 0
         }
       });
 
     } catch (reservationError) {
-      await Order.findByIdAndDelete(order._id).session(session);
-      await session.abortTransaction();
-
       console.error('❌ Stock reservation failed for offline order:', reservationError);
+      
+      // Delete the order and abort transaction
+      try {
+        await Order.findByIdAndDelete(order._id).session(session);
+        await safeAbortTransaction(session, transactionStarted);
+      } catch (cleanupError) {
+        console.error('❌ Cleanup error:', cleanupError);
+      }
 
       res.status(400).json({
         success: false,
@@ -734,15 +764,52 @@ export const createOfflineOrder = async (req, res) => {
     }
 
   } catch (error) {
-    await session.abortTransaction();
     console.error('❌ Create Offline Order Error:', error);
+    
+    try {
+      await safeAbortTransaction(session, transactionStarted);
+    } catch (abortError) {
+      console.error('❌ Error during transaction abort:', abortError);
+    }
+
     res.status(500).json({
       success: false,
       message: 'Server error while creating offline order',
       error: error.message
     });
   } finally {
-    session.endSession();
+    try {
+      await safeEndSession(session);
+    } catch (sessionError) {
+      console.error('❌ Error ending session:', sessionError);
+    }
+  }
+};
+
+// Helper function to safely abort transaction
+const safeAbortTransaction = async (session, transactionStarted) => {
+  if (session && transactionStarted) {
+    try {
+      console.log('🔄 Aborting transaction...');
+      await session.abortTransaction();
+      console.log('✅ Transaction aborted successfully');
+    } catch (abortError) {
+      console.error('❌ Error aborting transaction:', abortError);
+      // Don't throw, just log the error
+    }
+  }
+};
+
+// Helper function to safely end session
+const safeEndSession = async (session) => {
+  if (session) {
+    try {
+      console.log('🔄 Ending session...');
+      await session.endSession();
+      console.log('✅ Session ended successfully');
+    } catch (sessionError) {
+      console.error('❌ Error ending session:', sessionError);
+    }
   }
 };
 
@@ -1686,5 +1753,143 @@ export const getRetailerOrderHistory = async (req, res) => {
       message: 'Server error',
       error: error.message
     });
+  }
+};
+// @desc    Mark order as paid (for offline orders)
+// @route   PUT /api/orders/:id/mark-paid
+// @access  Private/Retailer
+export const markOrderAsPaid = async (req, res) => {
+  const session = await mongoose.startSession();
+  
+  try {
+    session.startTransaction();
+
+    const retailerId = req.user._id;
+    const orderIdentifier = req.params.id;
+
+    console.log('💰 Marking order as paid:', { retailerId, orderIdentifier });
+
+    // Verify retailer exists
+    const retailer = await Admin.findOne({ user: retailerId });
+    if (!retailer) {
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: 'Retailer profile not found'
+      });
+    }
+
+    // Find the order
+    const order = await findOrderById(orderIdentifier);
+    if (!order) {
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    // Check if retailer has permission to update this order
+    if (order.assignedRetailer.toString() !== retailer._id.toString() && 
+        order.processedBy?.toString() !== retailer._id.toString()) {
+      await session.abortTransaction();
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this order'
+      });
+    }
+
+    // Check if order is already paid
+    if (order.paymentStatus === 'paid') {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Order is already paid'
+      });
+    }
+
+    // Validate order type (should be offline)
+    if (order.orderType !== 'offline') {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Only offline orders can be marked as paid'
+      });
+    }
+
+    // ✅ FIXED: Only update paymentStatus, leave orderStatus unchanged
+    order.paymentStatus = 'paid';
+    
+    // ✅ FIXED: Handle stock deduction if reserved, but don't change orderStatus
+    if (order.reservationStatus === 'reserved') {
+      try {
+        const deliveryResult = await inventoryService.confirmOrderDelivery(
+          order._id,
+          order.assignedRetailer,
+          retailerId
+        );
+        
+        console.log('✅ Stock deducted on payment:', deliveryResult);
+        order.reservationStatus = 'delivered';
+        order.deliveredAt = new Date();
+        // ✅ Keep original orderStatus - don't change it to 'completed' or 'delivered'
+      } catch (deliveryError) {
+        console.error('❌ Failed to deduct stock on payment:', deliveryError);
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: 'Failed to update inventory: ' + deliveryError.message
+        });
+      }
+    }
+
+    await order.save({ session });
+    await session.commitTransaction();
+
+    // Populate order for response
+    await order.populate('items.product', 'name image unit');
+    
+    if (order.customer) {
+      await order.populate('customer', 'personalInfo.fullName');
+    }
+
+    console.log('✅ Order marked as paid successfully:', order.orderId);
+
+    res.status(200).json({
+      success: true,
+      message: 'Order marked as paid successfully',
+      order: {
+        _id: order._id,
+        orderId: order.orderId,
+        paymentStatus: order.paymentStatus, // Now 'paid'
+        orderStatus: order.orderStatus, // Stays as original (e.g., 'pending')
+        reservationStatus: order.reservationStatus,
+        finalAmount: order.finalAmount,
+        customerName: order.customerName || (order.customer?.personalInfo?.fullName || 'Customer'),
+        customerPhone: order.customerPhone,
+        items: order.items.map(item => ({
+          product: item.product ? {
+            _id: item.product._id,
+            name: item.product.name,
+            image: item.product.image,
+            unit: item.product.unit
+          } : { name: item.productName },
+          quantity: item.quantity,
+          price: item.price,
+          itemTotal: item.quantity * item.price
+        }))
+      }
+    });
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Mark Order as Paid Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while marking order as paid',
+      error: error.message
+    });
+  } finally {
+    session.endSession();
   }
 };

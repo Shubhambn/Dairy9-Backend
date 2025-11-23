@@ -1,4 +1,4 @@
-// services/inventory.service.js - COMPLETE UPDATED VERSION WITH REVENUE CALCULATION
+// services/inventory.service.js - COMPLETE UPDATED VERSION WITH PRICE VALIDATION
 import RetailerInventory from '../models/retailerInventory.model.js';
 import InventoryLog from '../models/inventoryLog.model.js';
 import Product from '../models/product.model.js';
@@ -9,6 +9,323 @@ import CacheService from './cache.service.js';
 class InventoryService {
     constructor() {
         this.batchSize = 50;
+    }
+
+    /**
+     * 🔥 NEW: Validate and correct suspicious retailer prices
+     */
+    async validateAndCorrectRetailerPrice(retailerId, productId, userId = 'system') {
+        try {
+            const inventoryItem = await RetailerInventory.findOne({
+                retailer: retailerId,
+                product: productId,
+                isActive: true
+            }).populate('product', 'name price');
+
+            if (!inventoryItem || !inventoryItem.product) {
+                return { valid: false, message: 'Inventory item not found' };
+            }
+
+            const catalogPrice = inventoryItem.product.price || 0;
+            const retailerPrice = inventoryItem.sellingPrice || 0;
+
+            // If retailer price is suspiciously high (more than 5x catalog price), correct it
+            if (retailerPrice > catalogPrice * 5 && catalogPrice > 0) {
+                console.warn(`🔄 Correcting suspicious retailer price: ${retailerPrice} → ${catalogPrice} for product ${inventoryItem.product.name}`);
+                
+                const previousPrice = retailerPrice;
+                inventoryItem.sellingPrice = catalogPrice;
+                await inventoryItem.save();
+                
+                // Log the correction
+                await InventoryLog.create({
+                    retailer: retailerId,
+                    product: productId,
+                    inventoryItem: inventoryItem._id,
+                    transactionType: 'STOCK_ADJUSTMENT',
+                    quantity: 0,
+                    previousStock: inventoryItem.currentStock,
+                    newStock: inventoryItem.currentStock,
+                    reason: 'PRICE_CORRECTION',
+                    notes: `Auto-corrected suspicious price from ${previousPrice} to ${catalogPrice}`,
+                    createdBy: userId
+                });
+
+                // Invalidate cache
+                await CacheService.invalidateInventoryCache(retailerId);
+
+                return {
+                    valid: true,
+                    corrected: true,
+                    previousPrice,
+                    correctedPrice: catalogPrice,
+                    message: 'Price auto-corrected'
+                };
+            }
+
+            return {
+                valid: true,
+                corrected: false,
+                currentPrice: retailerPrice,
+                message: 'Price is valid'
+            };
+        } catch (error) {
+            console.error('Price validation error:', error);
+            return { valid: false, message: error.message };
+        }
+    }
+
+    /**
+     * 🔥 NEW: Get validated product price with auto-correction
+     */
+    async getValidatedProductPrice(retailerId, productId, userId = 'system') {
+        try {
+            const inventoryItem = await RetailerInventory.findOne({
+                retailer: retailerId,
+                product: productId,
+                isActive: true
+            }).populate('product', 'name price category');
+
+            if (!inventoryItem) {
+                throw new Error('Product not found in retailer inventory');
+            }
+
+            const catalogPrice = inventoryItem.product?.price || 0;
+            let retailerPrice = inventoryItem.sellingPrice || 0;
+
+            // Validate and correct price if suspicious
+            let priceCorrected = false;
+            if (retailerPrice > catalogPrice * 5 && catalogPrice > 0) {
+                console.warn(`🔄 Auto-correcting price: ${retailerPrice} → ${catalogPrice}`);
+                retailerPrice = catalogPrice;
+                priceCorrected = true;
+                
+                // Update the price in database
+                inventoryItem.sellingPrice = catalogPrice;
+                await inventoryItem.save();
+
+                // Log the correction
+                await InventoryLog.create({
+                    retailer: retailerId,
+                    product: productId,
+                    inventoryItem: inventoryItem._id,
+                    transactionType: 'STOCK_ADJUSTMENT',
+                    quantity: 0,
+                    previousStock: inventoryItem.currentStock,
+                    newStock: inventoryItem.currentStock,
+                    reason: 'PRICE_CORRECTION',
+                    notes: `Auto-corrected suspicious price for offline order`,
+                    createdBy: userId
+                });
+
+                await CacheService.invalidateInventoryCache(retailerId);
+            }
+
+            // Calculate pricing with discounts
+            const priceInfo = await this.calculatePriceWithDiscounts(inventoryItem, retailerPrice, 1);
+
+            return {
+                productId,
+                productName: inventoryItem.productName,
+                catalogPrice,
+                retailerPrice,
+                ...priceInfo,
+                priceCorrected,
+                hasQuantityPricing: inventoryItem.enableQuantityPricing,
+                pricingSlabs: inventoryItem.pricingSlabs || [],
+                currentStock: inventoryItem.currentStock,
+                availableStock: inventoryItem.currentStock - inventoryItem.committedStock
+            };
+        } catch (error) {
+            console.error('Get validated product price error:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * 🔥 NEW: Calculate price with discounts for given quantity
+     */
+    async calculatePriceWithDiscounts(inventoryItem, basePrice, quantity) {
+        let discountedPrice = basePrice;
+        let appliedDiscount = 0;
+        let discountType = null;
+        let applicableSlab = null;
+
+        // Apply pricing slab discounts if available
+        if (inventoryItem.enableQuantityPricing && inventoryItem.pricingSlabs?.length > 0) {
+            applicableSlab = inventoryItem.pricingSlabs.find(slab => 
+                quantity >= slab.minQuantity && quantity <= slab.maxQuantity
+            );
+            
+            if (applicableSlab) {
+                if (applicableSlab.discountType === 'PERCENTAGE') {
+                    appliedDiscount = (basePrice * applicableSlab.discountValue) / 100;
+                    discountedPrice = basePrice - appliedDiscount;
+                    discountType = 'percentage';
+                } else if (applicableSlab.discountType === 'FLAT') {
+                    appliedDiscount = applicableSlab.discountValue;
+                    discountedPrice = basePrice - appliedDiscount;
+                    discountType = 'flat';
+                }
+            }
+        }
+
+        return {
+            basePrice,
+            discountedPrice,
+            appliedDiscount,
+            discountType,
+            applicableSlab,
+            finalPrice: discountedPrice * quantity,
+            baseTotal: basePrice * quantity,
+            discountTotal: appliedDiscount * quantity,
+            finalUnitPrice: discountedPrice
+        };
+    }
+
+    /**
+     * 🔥 UPDATED: Calculate price for quantity with validation
+     */
+    async calculatePriceForQuantity(retailerId, productId, quantity, userId = 'system') {
+        try {
+            const inventoryItem = await RetailerInventory.findOne({
+                retailer: retailerId,
+                product: productId,
+                isActive: true
+            }).populate('product', 'name sku unit unitSize image price');
+
+            if (!inventoryItem) {
+                throw new Error('Product not found in inventory');
+            }
+
+            const catalogPrice = inventoryItem.product?.price || 0;
+            let retailerPrice = inventoryItem.sellingPrice || 0;
+
+            // Validate and correct price if suspicious
+            let priceCorrected = false;
+            if (retailerPrice > catalogPrice * 5 && catalogPrice > 0) {
+                console.warn(`🔄 Auto-correcting price in calculatePriceForQuantity: ${retailerPrice} → ${catalogPrice}`);
+                retailerPrice = catalogPrice;
+                priceCorrected = true;
+                
+                // Update the price in database
+                inventoryItem.sellingPrice = catalogPrice;
+                await inventoryItem.save();
+
+                // Log the correction
+                await InventoryLog.create({
+                    retailer: retailerId,
+                    product: productId,
+                    inventoryItem: inventoryItem._id,
+                    transactionType: 'STOCK_ADJUSTMENT',
+                    quantity: 0,
+                    previousStock: inventoryItem.currentStock,
+                    newStock: inventoryItem.currentStock,
+                    reason: 'PRICE_CORRECTION',
+                    notes: `Auto-corrected suspicious price during price calculation`,
+                    createdBy: userId
+                });
+
+                await CacheService.invalidateInventoryCache(retailerId);
+            }
+
+            // Calculate pricing with discounts
+            const priceInfo = await this.calculatePriceWithDiscounts(inventoryItem, retailerPrice, quantity);
+
+            return {
+                productId,
+                productName: inventoryItem.productName,
+                catalogPrice,
+                retailerPrice,
+                ...priceInfo,
+                priceCorrected,
+                hasQuantityPricing: inventoryItem.enableQuantityPricing,
+                pricingSlabs: inventoryItem.enableQuantityPricing ? inventoryItem.pricingSlabs : []
+            };
+        } catch (error) {
+            console.error('Calculate price error:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * 🔥 NEW: Bulk validate and correct prices
+     */
+    async bulkValidateAndCorrectPrices(retailerId, productIds, userId = 'system') {
+        try {
+            const inventoryItems = await RetailerInventory.find({
+                retailer: retailerId,
+                product: { $in: productIds },
+                isActive: true
+            }).populate('product', 'name price category');
+
+            const results = [];
+            let correctedCount = 0;
+
+            for (const inventoryItem of inventoryItems) {
+                const catalogPrice = inventoryItem.product?.price || 0;
+                let retailerPrice = inventoryItem.sellingPrice || 0;
+
+                // Validate price and correct if suspicious
+                let priceCorrected = false;
+                if (retailerPrice > catalogPrice * 5 && catalogPrice > 0) {
+                    retailerPrice = catalogPrice;
+                    priceCorrected = true;
+                    correctedCount++;
+                    
+                    // Update the price in database
+                    inventoryItem.sellingPrice = catalogPrice;
+                    await inventoryItem.save();
+
+                    // Log the correction
+                    await InventoryLog.create({
+                        retailer: retailerId,
+                        product: inventoryItem.product._id,
+                        inventoryItem: inventoryItem._id,
+                        transactionType: 'STOCK_ADJUSTMENT',
+                        quantity: 0,
+                        previousStock: inventoryItem.currentStock,
+                        newStock: inventoryItem.currentStock,
+                        reason: 'PRICE_CORRECTION',
+                        notes: `Auto-corrected suspicious price in bulk validation`,
+                        createdBy: userId
+                    });
+                }
+
+                // Calculate pricing with discounts (for quantity = 1)
+                const priceInfo = await this.calculatePriceWithDiscounts(inventoryItem, retailerPrice, 1);
+
+                results.push({
+                    productId: inventoryItem.product._id,
+                    productName: inventoryItem.productName,
+                    catalogPrice,
+                    retailerPrice,
+                    ...priceInfo,
+                    priceCorrected,
+                    hasQuantityPricing: inventoryItem.enableQuantityPricing,
+                    pricingSlabs: inventoryItem.pricingSlabs || [],
+                    currentStock: inventoryItem.currentStock,
+                    availableStock: inventoryItem.currentStock - inventoryItem.committedStock
+                });
+            }
+
+            // Invalidate cache if any corrections were made
+            if (correctedCount > 0) {
+                await CacheService.invalidateInventoryCache(retailerId);
+            }
+
+            return {
+                products: results,
+                totalProducts: results.length,
+                correctedCount,
+                message: correctedCount > 0 ? 
+                    `Corrected ${correctedCount} suspicious prices automatically` : 
+                    'All prices are valid'
+            };
+        } catch (error) {
+            console.error('Bulk validate prices error:', error);
+            throw error;
+        }
     }
 
     /**
@@ -213,7 +530,6 @@ class InventoryService {
     /**
      * Update stock with transaction safety
      */
-// In inventory.service.js - Update session handling
     async updateStock(params) {
         const session = await mongoose.startSession();
         let inventoryItemBeforeSave = null;
@@ -383,7 +699,6 @@ class InventoryService {
             await session.endSession();
         }
     }
-
 
     /**
      * Add product to retailer inventory
@@ -1345,81 +1660,49 @@ class InventoryService {
         }
     }
 
+    /**
+     * Calculate per-piece pricing for order items
+     */
+    async calculateOrderPricing(retailerId, orderItems) {
+        try {
+            const pricedItems = [];
 
-async calculatePriceForQuantity(retailerId, productId, quantity) {
-    try {
-        const inventoryItem = await RetailerInventory.findOne({
-            retailer: retailerId,
-            product: productId,
-            isActive: true
-        }).populate('product', 'name sku unit unitSize image');
+            for (const item of orderItems) {
+                const priceInfo = await this.calculatePriceForQuantity(
+                    retailerId,
+                    item.productId,
+                    item.quantity
+                );
 
-        if (!inventoryItem) {
-            throw new Error('Product not found in inventory');
-        }
-
-        // ✅ Use the new per-piece calculation method
-        const priceInfo = inventoryItem.calculatePricePerPiece(quantity);
-
-        return {
-            productId,
-            productName: inventoryItem.productName,
-            ...priceInfo,
-            hasQuantityPricing: inventoryItem.enableQuantityPricing,
-            pricingSlabs: inventoryItem.enableQuantityPricing ? inventoryItem.pricingSlabs : []
-        };
-    } catch (error) {
-        console.error('Calculate price error:', error);
-        throw error;
-    }
-}
-
-
-/**
- * Calculate per-piece pricing for order items
- */
-async calculateOrderPricing(retailerId, orderItems) {
-    try {
-        const pricedItems = [];
-
-        for (const item of orderItems) {
-            const priceInfo = await this.calculatePriceForQuantity(
-                retailerId,
-                item.productId,
-                item.quantity
-            );
-
-            pricedItems.push({
-                ...item,
-                pricing: priceInfo,
-                finalPrice: priceInfo.finalPrice,
-                unitPrice: priceInfo.finalUnitPrice
-            });
-        }
-
-        // Calculate order totals
-        const orderTotal = pricedItems.reduce((sum, item) => sum + item.finalPrice, 0);
-        const totalDiscount = pricedItems.reduce((sum, item) => sum + item.pricing.appliedDiscount, 0);
-        const baseTotal = pricedItems.reduce((sum, item) => sum + item.pricing.baseTotal, 0);
-
-        return {
-            items: pricedItems,
-            summary: {
-                baseTotal: Math.round(baseTotal * 100) / 100,
-                finalTotal: Math.round(orderTotal * 100) / 100,
-                totalDiscount: Math.round(totalDiscount * 100) / 100,
-                totalSavings: Math.round((baseTotal - orderTotal) * 100) / 100,
-                savingsPercentage: baseTotal > 0 ? 
-                    Math.round(((baseTotal - orderTotal) / baseTotal) * 100 * 100) / 100 : 0
+                pricedItems.push({
+                    ...item,
+                    pricing: priceInfo,
+                    finalPrice: priceInfo.finalPrice,
+                    unitPrice: priceInfo.finalUnitPrice
+                });
             }
-        };
-    } catch (error) {
-        console.error('Calculate order pricing error:', error);
-        throw error;
+
+            // Calculate order totals
+            const orderTotal = pricedItems.reduce((sum, item) => sum + item.finalPrice, 0);
+            const totalDiscount = pricedItems.reduce((sum, item) => sum + item.pricing.appliedDiscount * item.quantity, 0);
+            const baseTotal = pricedItems.reduce((sum, item) => sum + item.pricing.baseTotal, 0);
+
+            return {
+                items: pricedItems,
+                summary: {
+                    baseTotal: Math.round(baseTotal * 100) / 100,
+                    finalTotal: Math.round(orderTotal * 100) / 100,
+                    totalDiscount: Math.round(totalDiscount * 100) / 100,
+                    totalSavings: Math.round((baseTotal - orderTotal) * 100) / 100,
+                    savingsPercentage: baseTotal > 0 ? 
+                        Math.round(((baseTotal - orderTotal) / baseTotal) * 100 * 100) / 100 : 0
+                }
+            };
+        } catch (error) {
+            console.error('Calculate order pricing error:', error);
+            throw error;
+        }
     }
-}
-
-
 
     /**
      * Bulk calculate prices for multiple products
@@ -1462,4 +1745,4 @@ async calculateOrderPricing(retailerId, orderItems) {
 }
 
 // ✅ IMPORTANT: Export as default instance
-export default new InventoryService();   //TEJAS
+export default new InventoryService();

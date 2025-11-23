@@ -3,14 +3,12 @@ import asyncHandler from 'express-async-handler';
 import { body, validationResult } from 'express-validator';
 import InventoryService from '../services/inventory.service.js';
 import Admin from '../models/admin.model.js';
-import InventoryLog from '../models/inventoryLog.model.js'; // ✅ ADD THIS IMPORT
-import CacheService from '../services/cache.service.js'; // ✅ ADD THIS IMPORT
-// In inventory.controller.js - ADD THIS IMPORT
-import RevenueCalculationService from '../services/revenueCalculation.service.js'; // Add this line
+import InventoryLog from '../models/inventoryLog.model.js';
+import RetailerInventory from '../models/retailerInventory.model.js';
+import CacheService from '../services/cache.service.js';
+import RevenueCalculationService from '../services/revenueCalculation.service.js';
 
 // Validation rules
-// CORRECT VALIDATION MIDDLEWARE - Update this
-// controllers/inventory.controller.js - Update the validation rules
 export const validateStockUpdate = [
   body('productId')
     .isMongoId()
@@ -58,8 +56,6 @@ const getRetailerFromUser = async (userId) => {
   return retailer;
 };
 
-
-
 /**
  * @desc    Get retailer inventory
  * @route   GET /api/retailer/inventory
@@ -72,7 +68,6 @@ export const getRetailerInventory = asyncHandler(async (req, res) => {
 
     const result = await InventoryService.getRetailerInventory(retailer._id, filters);
 
-    
     res.json({
       success: true,
       data: result
@@ -212,10 +207,6 @@ export const updateInventoryItem = asyncHandler(async (req, res) => {
   }
 });
 
-
-// Add this import at the top
-import RetailerInventory from '../models/retailerInventory.model.js';
-
 /**
  * @desc    Delete inventory item
  * @route   DELETE /api/retailer/inventory/products/:inventoryId
@@ -271,7 +262,7 @@ export const deleteInventoryItem = asyncHandler(async (req, res) => {
       quantity: 0,
       previousStock: inventoryItem.currentStock,
       newStock: 0,
-      reason: 'DELETION', // This will now work after schema update
+      reason: 'DELETION',
       notes: `Inventory item permanently deleted - Product: ${inventoryItem.productName}`,
       createdBy: req.user._id
     });
@@ -486,10 +477,6 @@ export const getInventoryForCustomer = asyncHandler(async (req, res) => {
   }
 });
 
-
-
-// Add these controller methods to inventory.controller.js
-
 /**
  * @desc    Update pricing slabs for inventory item
  * @route   PUT /api/retailer/inventory/products/:inventoryId/pricing-slabs
@@ -650,10 +637,6 @@ export const bulkCalculatePrices = [
   })
 ];
 
-
-
-
-
 /**
  * @desc    Get inventory dashboard with revenue metrics
  * @route   GET /api/retailer/inventory/dashboard
@@ -811,7 +794,6 @@ export const getRevenueAnalytics = asyncHandler(async (req, res) => {
   }
 });     
 
-
 /**
  * @desc    Calculate order pricing with per-piece discounts
  * @route   POST /api/retailer/inventory/calculate-order-pricing
@@ -860,4 +842,319 @@ export const calculateOrderPricing = [
             });
         }
     })
+];
+
+/**
+ * @desc    🔥 NEW: Validate and correct suspicious retailer prices
+ * @route   POST /api/retailer/inventory/validate-prices
+ * @access  Private (Retailer)
+ */
+export const validateInventoryPrices = asyncHandler(async (req, res) => {
+  try {
+    const retailer = await getRetailerFromUser(req.user._id);
+    
+    const inventory = await RetailerInventory.find({
+      retailer: retailer._id,
+      isActive: true
+    }).populate('product', 'name price');
+
+    let corrections = [];
+    let correctedCount = 0;
+
+    for (const item of inventory) {
+      const catalogPrice = item.product?.price || 0;
+      const retailerPrice = item.sellingPrice || 0;
+
+      // Check for suspicious prices (more than 5x catalog price)
+      if (retailerPrice > catalogPrice * 5 && catalogPrice > 0) {
+        const previousPrice = retailerPrice;
+        item.sellingPrice = catalogPrice;
+        await item.save();
+
+        // Create correction log
+        await InventoryLog.create({
+          retailer: retailer._id,
+          product: item.product._id,
+          inventoryItem: item._id,
+          transactionType: 'STOCK_ADJUSTMENT',
+          quantity: 0,
+          previousStock: item.currentStock,
+          newStock: item.currentStock,
+          reason: 'PRICE_CORRECTION',
+          notes: `Auto-corrected suspicious price from ${previousPrice} to ${catalogPrice}`,
+          createdBy: req.user._id
+        });
+
+        corrections.push({
+          productId: item.product._id,
+          productName: item.product.name,
+          previousPrice,
+          correctedPrice: catalogPrice
+        });
+        correctedCount++;
+      }
+    }
+
+    // Invalidate cache after corrections
+    await CacheService.invalidateInventoryCache(retailer._id);
+
+    res.json({
+      success: true,
+      message: `Validated ${inventory.length} products, corrected ${correctedCount} suspicious prices`,
+      data: {
+        totalProducts: inventory.length,
+        correctedCount,
+        corrections
+      }
+    });
+
+  } catch (error) {
+    console.error('Validate prices error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to validate prices'
+    });
+  }
+});
+
+/**
+ * @desc    🔥 NEW: Get retailer price with validation for offline orders
+ * @route   GET /api/retailer/inventory/product-price/:productId
+ * @access  Private (Retailer)
+ */
+export const getValidatedProductPrice = asyncHandler(async (req, res) => {
+  try {
+    const { productId } = req.params;
+    const retailer = await getRetailerFromUser(req.user._id);
+
+    // Get inventory item
+    const inventoryItem = await RetailerInventory.findOne({
+      retailer: retailer._id,
+      product: productId,
+      isActive: true
+    }).populate('product', 'name price category');
+
+    if (!inventoryItem) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found in retailer inventory'
+      });
+    }
+
+    const catalogPrice = inventoryItem.product?.price || 0;
+    const retailerPrice = inventoryItem.sellingPrice || 0;
+
+    // Validate price and correct if suspicious
+    let finalPrice = retailerPrice;
+    let priceCorrected = false;
+
+    if (retailerPrice > catalogPrice * 5 && catalogPrice > 0) {
+      finalPrice = catalogPrice;
+      priceCorrected = true;
+      
+      // Auto-correct the price
+      inventoryItem.sellingPrice = catalogPrice;
+      await inventoryItem.save();
+
+      // Log the correction
+      await InventoryLog.create({
+        retailer: retailer._id,
+        product: productId,
+        inventoryItem: inventoryItem._id,
+        transactionType: 'STOCK_ADJUSTMENT',
+        quantity: 0,
+        previousStock: inventoryItem.currentStock,
+        newStock: inventoryItem.currentStock,
+        reason: 'PRICE_CORRECTION',
+        notes: `Auto-corrected suspicious price from ${retailerPrice} to ${catalogPrice} for offline order`,
+        createdBy: req.user._id
+      });
+
+      await CacheService.invalidateInventoryCache(retailer._id);
+    }
+
+    // Calculate discounted price with pricing slabs (for quantity = 1)
+    let discountedPrice = finalPrice;
+    let appliedDiscount = 0;
+    let discountType = null;
+
+    if (inventoryItem.enableQuantityPricing && inventoryItem.pricingSlabs?.length > 0) {
+      const applicableSlab = inventoryItem.pricingSlabs.find(slab => 
+        1 >= slab.minQuantity && 1 <= slab.maxQuantity
+      );
+      
+      if (applicableSlab) {
+        if (applicableSlab.discountType === 'PERCENTAGE') {
+          appliedDiscount = (finalPrice * applicableSlab.discountValue) / 100;
+          discountedPrice = finalPrice - appliedDiscount;
+          discountType = 'percentage';
+        } else if (applicableSlab.discountType === 'FLAT') {
+          appliedDiscount = applicableSlab.discountValue;
+          discountedPrice = finalPrice - appliedDiscount;
+          discountType = 'flat';
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        productId,
+        productName: inventoryItem.productName,
+        catalogPrice,
+        retailerPrice: finalPrice,
+        discountedPrice,
+        appliedDiscount,
+        discountType,
+        priceCorrected,
+        hasQuantityPricing: inventoryItem.enableQuantityPricing,
+        pricingSlabs: inventoryItem.pricingSlabs || [],
+        currentStock: inventoryItem.currentStock,
+        availableStock: inventoryItem.currentStock - inventoryItem.committedStock
+      }
+    });
+
+  } catch (error) {
+    console.error('Get validated product price error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get product price',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @desc    🔥 NEW: Bulk get validated prices for multiple products (for offline orders)
+ * @route   POST /api/retailer/inventory/bulk-validated-prices
+ * @access  Private (Retailer)
+ */
+export const getBulkValidatedPrices = [
+  body('productIds')
+    .isArray({ min: 1 })
+    .withMessage('Product IDs array is required'),
+  body('productIds.*')
+    .isMongoId()
+    .withMessage('Valid product ID is required'),
+
+  asyncHandler(async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed',
+          errors: errors.array()
+        });
+      }
+
+      const { productIds } = req.body;
+      const retailer = await getRetailerFromUser(req.user._id);
+
+      const inventoryItems = await RetailerInventory.find({
+        retailer: retailer._id,
+        product: { $in: productIds },
+        isActive: true
+      }).populate('product', 'name price category');
+
+      const results = [];
+      let correctedCount = 0;
+
+      for (const inventoryItem of inventoryItems) {
+        const catalogPrice = inventoryItem.product?.price || 0;
+        const retailerPrice = inventoryItem.sellingPrice || 0;
+
+        // Validate price and correct if suspicious
+        let finalPrice = retailerPrice;
+        let priceCorrected = false;
+
+        if (retailerPrice > catalogPrice * 5 && catalogPrice > 0) {
+          finalPrice = catalogPrice;
+          priceCorrected = true;
+          correctedCount++;
+          
+          // Auto-correct the price
+          inventoryItem.sellingPrice = catalogPrice;
+          await inventoryItem.save();
+
+          // Log the correction
+          await InventoryLog.create({
+            retailer: retailer._id,
+            product: inventoryItem.product._id,
+            inventoryItem: inventoryItem._id,
+            transactionType: 'STOCK_ADJUSTMENT',
+            quantity: 0,
+            previousStock: inventoryItem.currentStock,
+            newStock: inventoryItem.currentStock,
+            reason: 'PRICE_CORRECTION',
+            notes: `Auto-corrected suspicious price from ${retailerPrice} to ${catalogPrice} for bulk offline order`,
+            createdBy: req.user._id
+          });
+        }
+
+        // Calculate discounted price with pricing slabs (for quantity = 1)
+        let discountedPrice = finalPrice;
+        let appliedDiscount = 0;
+        let discountType = null;
+
+        if (inventoryItem.enableQuantityPricing && inventoryItem.pricingSlabs?.length > 0) {
+          const applicableSlab = inventoryItem.pricingSlabs.find(slab => 
+            1 >= slab.minQuantity && 1 <= slab.maxQuantity
+          );
+          
+          if (applicableSlab) {
+            if (applicableSlab.discountType === 'PERCENTAGE') {
+              appliedDiscount = (finalPrice * applicableSlab.discountValue) / 100;
+              discountedPrice = finalPrice - appliedDiscount;
+              discountType = 'percentage';
+            } else if (applicableSlab.discountType === 'FLAT') {
+              appliedDiscount = applicableSlab.discountValue;
+              discountedPrice = finalPrice - appliedDiscount;
+              discountType = 'flat';
+            }
+          }
+        }
+
+        results.push({
+          productId: inventoryItem.product._id,
+          productName: inventoryItem.productName,
+          catalogPrice,
+          retailerPrice: finalPrice,
+          discountedPrice,
+          appliedDiscount,
+          discountType,
+          priceCorrected,
+          hasQuantityPricing: inventoryItem.enableQuantityPricing,
+          pricingSlabs: inventoryItem.pricingSlabs || [],
+          currentStock: inventoryItem.currentStock,
+          availableStock: inventoryItem.currentStock - inventoryItem.committedStock
+        });
+      }
+
+      // Invalidate cache if any corrections were made
+      if (correctedCount > 0) {
+        await CacheService.invalidateInventoryCache(retailer._id);
+      }
+
+      res.json({
+        success: true,
+        data: {
+          products: results,
+          totalProducts: results.length,
+          correctedCount,
+          message: correctedCount > 0 ? 
+            `Corrected ${correctedCount} suspicious prices automatically` : 
+            'All prices are valid'
+        }
+      });
+
+    } catch (error) {
+      console.error('Get bulk validated prices error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get bulk validated prices',
+        error: error.message
+      });
+    }
+  })
 ];
