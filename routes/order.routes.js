@@ -1,5 +1,3 @@
-// C:\Users\Krishna\OneDrive\Desktop\backend-dairy9\Dairy9-Backend\routes\order.routes.js
-
 import express from 'express';
 import {
   createOrder,
@@ -13,7 +11,8 @@ import {
   getRetailerOrders,
   getRetailerOrderStats,
   updateOrderStatusByRetailer,
-  markOrderDelivered
+  markOrderDelivered,
+  markOrderAsPaid 
 } from '../controllers/order.controller.js';
 import { generateInvoice } from '../controllers/invoice.controller.js';
 import auth from '../middlewares/auth.js';
@@ -33,6 +32,9 @@ router.put('/:id/cancel', cancelOrder);
 // ==================== RETAILER ROUTES ====================
 // Offline orders
 router.post('/offline', createOfflineOrder);
+
+// ✅ FIXED: Add the missing mark-paid route
+router.put('/:id/mark-paid', markOrderAsPaid);
 
 // Retailer order management
 router.get('/retailer/my-orders', getRetailerOrders);
@@ -78,5 +80,6 @@ router.put('/:id/status', (req, res, next) => {
 // Duplicate routes for backward compatibility (from first version)
 router.get('/retailer/active-orders', getRetailerActiveOrders);
 router.get('/retailer/order-history', getRetailerOrderHistory);
+
 
 export default router;

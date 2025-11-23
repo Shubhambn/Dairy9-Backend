@@ -255,7 +255,7 @@ const orderSchema = new mongoose.Schema({
   cancellationReason: String,
   orderStatus: {
     type: String,
-    enum: ['pending', 'confirmed', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'],
+    enum: ['pending', 'confirmed', 'preparing', 'out_for_delivery', 'delivered', 'cancelled', 'completed'],
     default: 'pending'
   },
   deliveryDate: Date,
@@ -378,7 +378,7 @@ orderSchema.statics.findWithDiscounts = function(query = {}) {
 // Static method to get discount statistics
 orderSchema.statics.getDiscountStats = async function(retailerId = null, startDate = null, endDate = null) {
   const matchStage = {
-    orderStatus: 'delivered',
+    orderStatus: { $in: ['delivered', 'completed'] },
     'discountSummary.totalDiscount': { $gt: 0 }
   };
 
