@@ -97,6 +97,7 @@ const inventoryLogSchema = new mongoose.Schema({
       'TRANSFER_IN',
       'PRODUCTION',
       'ADJUSTMENT_IN',
+      'OFFLINE_ORDER_CANCELLATION',
 
       // Stock Out Reasons
       'SALE',
